@@ -1,5 +1,5 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
-import { AuditOutcome, Patient, Prisma, Role } from '@prisma/client';
+import { AuditOutcome, Patient, Prisma } from '@prisma/client';
 import { AppException } from '../common/exceptions/app.exception';
 import { AuthenticatedUser } from '../common/decorators/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -84,17 +84,19 @@ export class PatientsService {
     actor: AuthenticatedUser,
     query: PatientQueryDto,
   ): Promise<PaginatedPatientsResponseDto> {
-    const where: Prisma.PatientWhereInput = {};
-    if (actor.role !== Role.SUPER_ADMIN) {
-      if (!actor.hospitalId) {
-        throw new AppException(
-          'TENANT_CONTEXT_MISSING',
-          'Caller has no associated hospital.',
-          HttpStatus.FORBIDDEN,
-        );
-      }
-      where.hospitalId = actor.hospitalId;
+    // Unlike Users/Hospitals, SUPER_ADMIN does NOT get a platform-wide bypass
+    // here: clinical data is never implicitly visible to a platform
+    // administrator just because they administer the platform (§14 — platform
+    // administration and clinical access are deliberately separate). Every
+    // caller, SUPER_ADMIN included, must have a hospital context to see patients.
+    if (!actor.hospitalId) {
+      throw new AppException(
+        'TENANT_CONTEXT_MISSING',
+        'Caller has no associated hospital.',
+        HttpStatus.FORBIDDEN,
+      );
     }
+    const where: Prisma.PatientWhereInput = { hospitalId: actor.hospitalId };
 
     if (query.search) {
       const search = query.search.trim();
@@ -208,7 +210,9 @@ export class PatientsService {
     const patient = await this.prisma.patient.findUnique({ where: { id } });
     // 404 (not 403) for cross-tenant access, same reasoning as users/hospitals
     // (§9, §30): never confirm a patient exists in a tenant the caller can't see.
-    if (!patient || (actor.role !== Role.SUPER_ADMIN && patient.hospitalId !== actor.hospitalId)) {
+    // No SUPER_ADMIN bypass here (see findAllForTenant) — clinical access is
+    // never implicit for a platform administrator.
+    if (!patient || patient.hospitalId !== actor.hospitalId) {
       throw new AppException('PATIENT_NOT_FOUND', 'Patient not found.', HttpStatus.NOT_FOUND);
     }
     return patient;
