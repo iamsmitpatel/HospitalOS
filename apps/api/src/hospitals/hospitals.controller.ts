@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Req } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Role } from '@prisma/client';
-import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
+import { Permission } from '../common/constants/permissions.constants';
 import { CurrentUser, AuthenticatedUser } from '../common/decorators/current-user.decorator';
 import { ResponseMessage } from '../common/interceptors/response.interceptor';
 import { RequestWithCorrelationId } from '../common/middleware/correlation-id.middleware';
@@ -15,7 +15,7 @@ export class HospitalsController {
   constructor(private readonly hospitalsService: HospitalsService) {}
 
   @Post()
-  @Roles(Role.SUPER_ADMIN)
+  @RequirePermissions(Permission.HOSPITAL_CREATE)
   @ResponseMessage('Hospital created successfully.')
   create(
     @Body() dto: CreateHospitalDto,
@@ -26,7 +26,7 @@ export class HospitalsController {
   }
 
   @Get()
-  @Roles(Role.SUPER_ADMIN)
+  @RequirePermissions(Permission.HOSPITAL_LIST)
   @ResponseMessage('Hospitals retrieved successfully.')
   findAll(@CurrentUser() actor: AuthenticatedUser) {
     return this.hospitalsService.findAll(actor);
@@ -39,7 +39,7 @@ export class HospitalsController {
   }
 
   @Patch(':id')
-  @Roles(Role.SUPER_ADMIN)
+  @RequirePermissions(Permission.HOSPITAL_UPDATE)
   @ResponseMessage('Hospital updated successfully.')
   update(
     @Param('id', ParseUUIDPipe) id: string,
