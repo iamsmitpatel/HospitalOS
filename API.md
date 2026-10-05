@@ -28,11 +28,15 @@ Every response, success or failure, uses the same shape (master doc §15):
 | `POST /auth/login` | Public | Body: `{ email, password }`. Sets the refresh-token cookie; returns `{ accessToken, user }`. |
 | `POST /auth/refresh` | Public (reads refresh cookie) | Rotates the refresh token; returns a new `{ accessToken }`. |
 | `POST /auth/logout` | Public (reads refresh cookie) | Revokes the current refresh token; clears the cookie. |
-| `GET /auth/me` | Any authenticated role | Returns the caller's own profile. |
+| `GET /auth/me` | Any authenticated role | Returns the caller's own profile, including a nested `hospital: { id, name }` (or `null` for `SUPER_ADMIN`) — matches master doc §26's exact example shape. Note this differs from the `user` object returned by `/auth/login`/`/auth/register`/`/auth/refresh`, which only carries `hospitalId`. |
+
+## Authorization model
+
+Routes are gated one of two ways (see `/ARCHITECTURE.md` and `/SECURITY.md` for the mechanism): `@Roles(...)` (simple role allow-list, `SUPER_ADMIN` always passes — used by `patients/`) or `@RequirePermissions(...)` (checks the caller's role against an explicit `ROLE_PERMISSIONS` map, no implicit bypass — used by `users/` and `hospitals/` as of Phase 2). Both end up enforcing the same per-route table below; the permission-based routes are just centralized rather than hand-checked per controller.
 
 ## Users — `/api/v1/users`
 
-All routes: `SUPER_ADMIN` (platform-wide) or `HOSPITAL_ADMIN` (own tenant only).
+All routes: `SUPER_ADMIN` (platform-wide) or `HOSPITAL_ADMIN` (own tenant only) — enforced via `@RequirePermissions(Permission.USER_*)`.
 
 | Method & path | Notes |
 |---|---|
@@ -45,10 +49,10 @@ All routes: `SUPER_ADMIN` (platform-wide) or `HOSPITAL_ADMIN` (own tenant only).
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /hospitals` | `SUPER_ADMIN` | Creates a new tenant. `slug` must be unique, lowercase, hyphenated. |
-| `GET /hospitals` | `SUPER_ADMIN` | Lists every tenant on the platform. |
-| `GET /hospitals/:id` | Any authenticated role | `SUPER_ADMIN` can fetch any hospital; anyone else only their own (`404` otherwise). |
-| `PATCH /hospitals/:id` | `SUPER_ADMIN` | Rename or deactivate a tenant. |
+| `POST /hospitals` | `SUPER_ADMIN` (`hospital.create`) | Creates a new tenant. `slug` must be unique, lowercase, hyphenated. |
+| `GET /hospitals` | `SUPER_ADMIN` (`hospital.list`) | Lists every tenant on the platform. |
+| `GET /hospitals/:id` | Any authenticated role | `SUPER_ADMIN` can fetch any hospital; anyone else only their own (`404` otherwise). No permission decorator — gated by the service-layer tenant check instead. |
+| `PATCH /hospitals/:id` | `SUPER_ADMIN` (`hospital.update`) | Rename or deactivate a tenant. |
 
 ## Patients — `/api/v1/patients`
 
@@ -57,8 +61,8 @@ All routes: `SUPER_ADMIN` (platform-wide) or `HOSPITAL_ADMIN` (own tenant only).
 | Method & path | Auth | Notes |
 |---|---|---|
 | `POST /patients` | `HOSPITAL_ADMIN`, `DOCTOR`, `NURSE`, `RECEPTIONIST` | Registers a patient and issues a hospital-scoped MRN. `SUPER_ADMIN` cannot call this (no hospital context to register against — `403 TENANT_CONTEXT_MISSING`). |
-| `GET /patients` | Write roles + `PHARMACIST`, `LAB_TECHNICIAN`, `ACCOUNTANT` | Paginated, tenant-filtered list. Supports `?search=` across name/MRN/phone, `?page=`, `?pageSize=`. |
-| `GET /patients/:id` | Same read roles | `404 PATIENT_NOT_FOUND` if the patient doesn't exist *or* belongs to a different tenant. |
+| `GET /patients` | Write roles + `PHARMACIST`, `LAB_TECHNICIAN`, `ACCOUNTANT` | Paginated, tenant-filtered list. Supports `?search=` across name/MRN/phone, `?page=`, `?pageSize=`. **`SUPER_ADMIN` also receives `403 TENANT_CONTEXT_MISSING`** (fixed in Phase 2 — previously returned every patient across every tenant; see `/SECURITY.md`). |
+| `GET /patients/:id` | Same read roles | `404 PATIENT_NOT_FOUND` if the patient doesn't exist *or* belongs to a different tenant — including for `SUPER_ADMIN` as of Phase 2. |
 | `PATCH /patients/:id` | Same write roles | Updates demographic/contact fields and `isActive`; `mrn` is immutable. |
 
 ## Health — `/api/v1/health`

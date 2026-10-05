@@ -31,6 +31,19 @@ npm run start:dev
 
 The API listens on `http://localhost:3000` by default; Swagger docs at `http://localhost:3000/api/docs`; health check at `http://localhost:3000/api/v1/health`.
 
+## Running the frontend (`apps/web`)
+
+```bash
+cp apps/web/.env.local.example apps/web/.env.local   # NEXT_PUBLIC_API_BASE_URL, defaults to http://localhost:3000/api/v1
+npm run dev --workspace=apps/web                     # serves on http://localhost:3001
+```
+
+Port 3001 matches the API's default `CORS_ORIGIN` (`apps/api/.env.example`) out of the box — no extra config needed for local dev. Build/typecheck/lint: `npm run build|typecheck|lint --workspace=apps/web`.
+
+## A note on this environment
+
+Every verification step in this repo's history that needs Docker — generating/applying a Prisma migration against a real database, running the e2e test suite, running the API itself (it calls Postgres on boot) — is **blocked** here: `docker ps` fails with "Docker Desktop is unable to start," and the underlying `com.docker.service` Windows service cannot be started directly either (confirmed in both Phase 1 and Phase 2, independently). If you're reading this in an environment where Docker actually works, none of this applies to you — just follow "First-time setup" above. If you hit the same blocker, see `/DATABASE.md` for how the initial migration was generated without a live database connection (`prisma migrate diff`), and `/TESTING.md` for exactly what has and hasn't been executed as a result.
+
 ## Environment variables
 
 See `apps/api/.env.example` for the full list. The app **will not boot** if required variables are missing or invalid (`envValidationSchema`, Joi, `abortEarly: false` — every validation error is reported at once, not just the first). Notably:

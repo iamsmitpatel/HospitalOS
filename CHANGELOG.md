@@ -1,5 +1,19 @@
 # Changelog
 
+## Phase 2 — Core Platform Foundation (2026-10-05)
+
+Started from a substantial inherited Phase 1 implementation (zero git commits existed yet — see "Phase 1 baseline" commit). Closed gaps against the Phase 2 spec and fixed one real security issue found along the way.
+
+- **Security fix:** `patients.service.ts` — `SUPER_ADMIN` could previously list or fetch *any* patient in *any* hospital (tenant filter was skipped for that role). Removed the bypass in `findAllForTenant` and `getTenantScopedPatientOrThrow`; platform administration no longer implies clinical access (master doc §14). See `/SECURITY.md` and `/DECISIONS.md`.
+- **Permission foundation:** added `common/constants/permissions.constants.ts` (`Permission` + `ROLE_PERMISSIONS`), `PermissionsGuard`, `@RequirePermissions()`. `users/` and `hospitals/` now use it instead of `@Roles()`; `patients/` left untouched (out of scope). 5 new unit tests.
+- **`GET /auth/me`** now returns a nested `hospital: { id, name }` instead of just `hospitalId`, matching master doc §26's example exactly. Frontend dashboard depends on this.
+- **Database:** generated the initial Prisma migration (`20261005000000_init`) via `prisma migrate diff` (schema-to-schema, no live DB needed) — Docker Desktop cannot start in this environment, same blocker the Phase 0 re-audit hit. **Unverified**: never applied to a real Postgres instance. See `/DATABASE.md`.
+- **Tests added** (`apps/api/test/`): `rbac.e2e-spec.ts` (§29 role matrix), `security.e2e-spec.ts` (§51 token/role checklist + §32 mass assignment), `concurrency.e2e-spec.ts` (§52 duplicate-email and duplicate-slug races), `rate-limit.e2e-spec.ts` (§37). All type-check and lint clean; **none have been executed** — see `/TESTING.md` for why (same Docker blocker; `createTestApp()` hangs rather than failing fast without a live DB).
+- **Frontend (`apps/web`):** scaffolded from nothing — Next.js 14 + React 18, chosen over the "latest" `next@16.3.8` tag for stability (see `/DECISIONS.md`). `/login`, `/register` (bootstrap-only, matching the actual backend flow — not a generic signup form), `/dashboard` (protected shell), a shared API client with single-flight silent-refresh-on-401, and an in-memory-only access token. Build/typecheck/lint all pass; manually verified in a real browser (pages render, error handling works against an intentionally-unreachable API, auth redirects work) — no live-backend happy-path test yet, same blocker.
+- Reconciled `ARCHITECTURE.md`, `DATABASE.md`, `API.md`, `SECURITY.md`, `TESTING.md`, `DEPLOYMENT.md`, `README.md`, `DECISIONS.md` with the above.
+
+Still outstanding, not done in this pass (out of Phase 2 scope or blocked by environment): Patients module tenant-isolation/concurrency tests, the migration's actual application to a live database, e2e test execution, a CHECK constraint for `SUPER_ADMIN ⇒ hospitalId IS NULL`, CI.
+
 ## Phase 0 re-audit + Phase 1B build fixes (2026-10-05)
 
 An independent Phase 0 audit found that `apps/api/src/patients/*` and the `Patient`/MRN schema already existed on disk (unlike what `DATABASE.md`, `API.md`, `SECURITY.md`, `TESTING.md`, and this changelog previously claimed) but was never verified: `nest build` failed outright, and there were zero tests or a migration for it. See `DECISIONS.md` for the full account.

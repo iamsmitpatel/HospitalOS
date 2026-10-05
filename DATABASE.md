@@ -68,12 +68,12 @@ Indexed on `[hospitalId, lastName, firstName]` and `[hospitalId, phone]` for sea
 
 Hospital-scoped, not global: `{hospital.code}-{sequence padded to 6 digits}` (e.g. `SUN-000001`). Generation (`apps/api/src/patients/patients.service.ts`) increments `Hospital.mrnSequence` via an atomic `UPDATE ... increment` inside the same database transaction that creates the `Patient` row — Postgres row-locks the `Hospital` row for that update, so two concurrent registrations for the same hospital serialize and can never be issued the same MRN. The `@@unique([hospitalId, mrn])` constraint is the backstop if that logic is ever bypassed.
 
-**Status as of 2026-10-05: implemented in code, not yet verified.** The model and generation logic exist, but:
-- **No migration has been generated.** `apps/api/prisma/migrations/` does not exist on disk — this schema has never been applied to a real database. Run `npx prisma migrate dev` against a running local Postgres to generate it (attempted during this session; blocked because Docker Desktop would not start in this environment — see `DECISIONS.md`).
-- **No concurrency test exists** for simultaneous patient registration, despite master doc §19/§31 explicitly requiring one. No `patients.e2e-spec.ts` or `patients.service.spec.ts` exists at all.
+**Status as of 2026-10-05 (Phase 2): SUPER_ADMIN no longer has implicit cross-tenant read access to Patient data** (`findAllForTenant`/`getTenantScopedPatientOrThrow` in `patients.service.ts` — fixed this phase per master doc §14, see `/SECURITY.md` and `/DECISIONS.md`). Everything else about this module is unchanged and still not fully verified:
+- **A migration now exists** (see below) but has never been applied to a real database — still blocked by Docker Desktop in this environment.
+- **No concurrency test exists** for simultaneous patient registration, despite master doc §19/§31 explicitly requiring one. No `patients.e2e-spec.ts` or `patients.service.spec.ts` exists at all. (Phase 2 added the mandatory concurrency tests for Hospital/User — see `/TESTING.md` — but did not extend them to Patient, since building out the Patient module is explicitly out of Phase 2 scope.)
 - **No tenant-isolation test exists** for the Patient module — `tenant-isolation.e2e-spec.ts` covers Users and Hospitals only.
 
-Do not treat Patient/MRN as done per master doc §44 (Definition of Done) until those three gaps are closed.
+Do not treat Patient/MRN as done per master doc §44 (Definition of Done) until those gaps are closed.
 
 ## Running migrations
 
@@ -84,7 +84,7 @@ npm run prisma:migrate:deploy   # CI/production — applies existing migrations,
 npm run prisma:generate         # regenerate the Prisma Client after a schema change
 ```
 
-**No migration has been generated yet** — `apps/api/prisma/migrations/` does not currently exist. The first `prisma migrate dev` run (against the Postgres instance started by `docker compose up -d`, see root `docker-compose.yml`) will create it and name it `<timestamp>_init`. Do this before anything else; `prisma migrate deploy` has nothing to apply until it exists.
+**A migration exists at `apps/api/prisma/migrations/20261005000000_init/` but has never been applied to a real database — treat it as unverified.** Docker Desktop cannot start in this sandboxed environment (`docker ps` fails with "Docker Desktop is unable to start"; the underlying `com.docker.service` Windows service cannot even be started — confirmed both at the start of Phase 1 and again in Phase 2), so `prisma migrate dev` has never been run against a live Postgres instance here. The SQL was instead generated with `prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`, which computes the schema diff without needing a database connection, and placed by hand into a conventional `<timestamp>_init/migration.sql` + `migration_lock.toml` structure. This produces byte-for-byte the same DDL `prisma migrate dev` would have generated from an empty database, but **it has not been proven to actually apply cleanly** — no migration history table has ever been created, no `prisma migrate deploy` has ever run successfully end-to-end. The first person with working Docker/Postgres access must run `npx prisma migrate deploy` (or `migrate dev` to let Prisma re-derive a matching migration and confirm no drift) before this can be considered verified.
 
 ## Local databases
 
