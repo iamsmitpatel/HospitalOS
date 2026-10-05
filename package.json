@@ -1,0 +1,29 @@
+{
+  "name": "hospitalos",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HospitalOS monorepo - hospital operating platform (API + Web)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev --workspace=apps/api",
+    "build:api": "npm run build --workspace=apps/api",
+    "test:api": "npm run test --workspace=apps/api",
+    "test:e2e:api": "npm run test:e2e --workspace=apps/api",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "prisma@6.19.3": true,
+    "bcrypt@6.0.0": true,
+    "@parcel/watcher@2.6.0": true,
+    "unrs-resolver@1.12.2": true,
+    "@scarf/scarf": false
+  }
+}

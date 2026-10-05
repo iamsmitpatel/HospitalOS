@@ -1,0 +1,211 @@
+// HospitalOS - Phase 1 (Foundation) + Phase 1B (Patient) schema.
+// Scope: tenancy (Hospital), identity (User), auth session state (RefreshToken),
+// AuditLog, and Patient/MRN. Clinical, scheduling, billing domains are deliberately
+// out of scope until their respective phases (see /DECISIONS.md and the master roadmap).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  HOSPITAL_ADMIN
+  DOCTOR
+  NURSE
+  RECEPTIONIST
+  PHARMACIST
+  LAB_TECHNICIAN
+  ACCOUNTANT
+  PATIENT
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  UNKNOWN
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Hospital {
+  id       String @id @default(uuid())
+  name     String
+  slug     String @unique
+
+  // Short uppercase identifier used as the MRN prefix (e.g. "SUN" -> SUN-000001).
+  // Set once at hospital creation; not editable afterward (changing it would
+  // make previously issued MRNs inconsistent with newly issued ones).
+  code     String @unique
+
+  // Monotonic per-hospital counter backing MRN generation. Incremented via a
+  // single atomic UPDATE (Prisma `increment`) inside the transaction that
+  // creates the patient, so concurrent registrations never hand out the same
+  // MRN twice — see patients/patients.service.ts and /DECISIONS.md.
+  mrnSequence Int    @default(0)
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  patients  Patient[]
+  auditLogs AuditLog[]
+
+  @@map("hospitals")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Null only for SUPER_ADMIN, who is not scoped to a single hospital.
+  // Enforced at the application layer (see users/users.service.ts) since
+  // Prisma cannot express a conditional NOT NULL constraint declaratively.
+  hospitalId String?
+  hospital   Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  refreshTokens     RefreshToken[]
+  auditLogs         AuditLog[]
+  registeredPatients Patient[] @relation("PatientRegisteredBy")
+
+  @@index([hospitalId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Auth session state
+// ---------------------------------------------------------------------------
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // SHA-256 of the raw refresh token string. Deterministic (not bcrypt) because
+  // the token must be looked up by exact match; the JWT signature is the
+  // primary authenticity guarantee, this hash backs revocation/reuse checks.
+  tokenHash String    @unique
+
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  // Points to the token that replaced this one when rotated, forming a chain
+  // used to detect refresh-token reuse (a revoked token presented again).
+  replacedByTokenId String?
+
+  createdByIp String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Patient
+// ---------------------------------------------------------------------------
+
+model Patient {
+  id         String   @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  // Hospital-scoped identifier, e.g. "SUN-000001". Unique per hospital, not
+  // globally — see the @@unique below and /DATABASE.md for why, and
+  // patients.service.ts for the atomic generation logic. Immutable once set.
+  mrn String
+
+  firstName String
+  lastName  String
+  dateOfBirth DateTime @db.Date
+  gender      Gender
+
+  phone String
+  email String?
+
+  // A single free-text line rather than a structured address table — Phase 1B
+  // deliberately keeps this minimal (master doc §18: "do not build all of
+  // these immediately"). A normalized PatientAddress model is a reasonable
+  // later addition if/when it's actually needed (e.g. multi-address support).
+  addressLine String?
+
+  emergencyContactName  String?
+  emergencyContactPhone String?
+
+  isActive Boolean @default(true)
+
+  registeredByUserId String
+  registeredBy       User   @relation("PatientRegisteredBy", fields: [registeredByUserId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([hospitalId, mrn])
+  @@index([hospitalId, lastName, firstName])
+  @@index([hospitalId, phone])
+  @@map("patients")
+}
+
+// ---------------------------------------------------------------------------
+// Security / Audit
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id      String   @id @default(uuid())
+
+  // Null for events with no authenticated actor (e.g. failed login attempts).
+  actorUserId String?
+  actor       User?   @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  // Null for platform-level actions with no tenant context (e.g. SUPER_ADMIN
+  // actions, or a failed login where the hospital could not be resolved).
+  hospitalId String?
+  hospital   Hospital? @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+
+  action       String
+  resourceType String?
+  resourceId   String?
+  outcome      AuditOutcome
+
+  ipAddress     String?
+  correlationId String?
+
+  // Non-sensitive structured context only. Never store passwords, tokens,
+  // OTPs, or clinical payloads here (see /SECURITY.md).
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([hospitalId, createdAt])
+  @@index([actorUserId])
+  @@index([action])
+  @@map("audit_logs")
+}
