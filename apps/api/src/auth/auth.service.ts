@@ -29,6 +29,15 @@ export interface AuthenticatedUserProfile {
   hospitalId: string | null;
 }
 
+export interface MeResponse {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  role: Role;
+  hospital: { id: string; name: string } | null;
+}
+
 interface RequestContext {
   ipAddress?: string;
   correlationId?: string;
@@ -248,12 +257,22 @@ export class AuthService {
     }
   }
 
-  async me(userId: string): Promise<AuthenticatedUserProfile> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+  async me(userId: string): Promise<MeResponse> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { hospital: { select: { id: true, name: true } } },
+    });
     if (!user) {
       throw new AppException('USER_NOT_FOUND', 'User not found.', HttpStatus.NOT_FOUND);
     }
-    return this.toProfile(user);
+    return {
+      id: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      hospital: user.hospital ? { id: user.hospital.id, name: user.hospital.name } : null,
+    };
   }
 
   private async issueTokenPair(

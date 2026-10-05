@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { AppConfig } from '../config/configuration';
 import { Public } from '../common/decorators/public.decorator';
@@ -11,6 +11,7 @@ import { parseDurationToMs } from '../common/utils/duration.util';
 import { AuthService, IssuedTokenPair } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { MeResponseDto } from './dto/auth-response.dto';
 import { REFRESH_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE_PATH } from './auth.constants';
 
 @ApiTags('auth')
@@ -69,6 +70,7 @@ export class AuthController {
   }
 
   @Get('me')
+  @ApiResponse({ type: MeResponseDto })
   @ResponseMessage('Current user retrieved successfully.')
   async me(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.me(user.userId);
