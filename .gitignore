@@ -22,6 +22,9 @@ logs/
 # Testing
 coverage/
 
+# TypeScript build cache
+*.tsbuildinfo
+
 # Prisma
 apps/api/prisma/migrations/dev/
 
