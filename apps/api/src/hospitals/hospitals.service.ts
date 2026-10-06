@@ -7,6 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.constants';
 import { CreateHospitalDto } from './dto/create-hospital.dto';
 import { UpdateHospitalDto } from './dto/update-hospital.dto';
+import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { HospitalResponseDto } from './dto/hospital-response.dto';
 
 @Injectable()
@@ -106,6 +107,49 @@ export class HospitalsService {
     return this.toResponse(updated);
   }
 
+  /**
+   * HospitalOS Connect (Phase 5): deliberately narrower than update() above
+   * — gated by HOSPITAL_PUBLIC_PROFILE_MANAGE, not HOSPITAL_UPDATE, so a
+   * HOSPITAL_ADMIN can manage their own discovery listing without gaining
+   * the platform-level rename/deactivate power update() still requires
+   * SUPER_ADMIN for. Reuses the same tenant check as every other
+   * hospital-scoped method in this class.
+   */
+  async updatePublicProfile(
+    id: string,
+    dto: UpdatePublicProfileDto,
+    actor: AuthenticatedUser,
+    correlationId?: string,
+  ): Promise<HospitalResponseDto> {
+    const hospital = await this.getTenantScopedHospitalOrThrow(id, actor);
+
+    const updated = await this.prisma.hospital.update({
+      where: { id: hospital.id },
+      data: {
+        isPublic: dto.isPublic,
+        publicDescription: dto.publicDescription,
+        addressLine: dto.addressLine,
+        city: dto.city,
+        publicPhone: dto.publicPhone,
+        publicEmail: dto.publicEmail,
+        operatingHours: dto.operatingHours,
+      },
+    });
+
+    await this.auditService.log({
+      action: AuditAction.HOSPITAL_PUBLIC_PROFILE_UPDATED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: actor.userId,
+      hospitalId: updated.id,
+      resourceType: 'Hospital',
+      resourceId: updated.id,
+      correlationId,
+      metadata: { changedFields: Object.keys(dto) },
+    });
+
+    return this.toResponse(updated);
+  }
+
   private async getTenantScopedHospitalOrThrow(
     id: string,
     actor: AuthenticatedUser,
@@ -124,6 +168,13 @@ export class HospitalsService {
       slug: hospital.slug,
       code: hospital.code,
       isActive: hospital.isActive,
+      isPublic: hospital.isPublic,
+      publicDescription: hospital.publicDescription,
+      addressLine: hospital.addressLine,
+      city: hospital.city,
+      publicPhone: hospital.publicPhone,
+      publicEmail: hospital.publicEmail,
+      operatingHours: hospital.operatingHours,
       createdAt: hospital.createdAt,
     };
   }

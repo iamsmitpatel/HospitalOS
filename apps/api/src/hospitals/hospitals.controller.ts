@@ -7,6 +7,7 @@ import { ResponseMessage } from '../common/interceptors/response.interceptor';
 import { RequestWithCorrelationId } from '../common/middleware/correlation-id.middleware';
 import { CreateHospitalDto } from './dto/create-hospital.dto';
 import { UpdateHospitalDto } from './dto/update-hospital.dto';
+import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { HospitalsService } from './hospitals.service';
 
 @ApiTags('hospitals')
@@ -48,5 +49,17 @@ export class HospitalsController {
     @Req() req: RequestWithCorrelationId,
   ) {
     return this.hospitalsService.update(id, dto, actor, req.correlationId);
+  }
+
+  @Patch(':id/public-profile')
+  @RequirePermissions(Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE)
+  @ResponseMessage('Public profile updated successfully.')
+  updatePublicProfile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePublicProfileDto,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Req() req: RequestWithCorrelationId,
+  ) {
+    return this.hospitalsService.updatePublicProfile(id, dto, actor, req.correlationId);
   }
 }
