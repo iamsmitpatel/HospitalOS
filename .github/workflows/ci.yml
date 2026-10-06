@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api:
+    name: API (lint, build, unit + e2e tests)
+    runs-on: ubuntu-latest
+
+    # GitHub Actions runners provide real Docker-backed service containers —
+    # the exact capability missing in the sandboxed environment this
+    # project was built in. Every e2e-spec.ts file across every phase was
+    # written and type-checked but never executed locally for that reason
+    # (see /TESTING.md); this is where they actually run for the first time.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hospitalos
+          POSTGRES_PASSWORD: hospitalos_ci_password
+          POSTGRES_DB: hospitalos_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U hospitalos"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://hospitalos:hospitalos_ci_password@localhost:5432/hospitalos_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: ci-only-access-secret-at-least-32-characters-long
+      JWT_REFRESH_SECRET: ci-only-refresh-secret-at-least-32-characters-long
+      CORS_ORIGIN: http://localhost:3001
+      AUTH_THROTTLE_LIMIT: '1000'
+      DEFAULT_THROTTLE_LIMIT: '1000'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --workspace=apps/api
+
+      - name: Typecheck + build
+        run: npm run build --workspace=apps/api
+
+      - name: Apply migrations to the CI database
+        working-directory: apps/api
+        run: npx prisma migrate deploy
+
+      - name: Unit tests
+        run: npm run test:api
+
+      - name: E2E tests
+        run: npm run test:e2e:api
+
+  web:
+    name: Web (lint, typecheck, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --workspace=apps/web
+
+      - name: Typecheck
+        run: npm run typecheck --workspace=apps/web
+
+      - name: Build
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:3000/api/v1
+        run: npm run build --workspace=apps/web
