@@ -26,6 +26,9 @@ import { LaboratoryModule } from './laboratory/laboratory.module';
 import { PharmacyModule } from './pharmacy/pharmacy.module';
 import { BillingModule } from './billing/billing.module';
 import { PaymentsModule } from './payments/payments.module';
+import { ConnectModule } from './connect/connect.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { MetricsInterceptor } from './metrics/metrics.interceptor';
 
 @Module({
   imports: [
@@ -41,13 +44,19 @@ import { PaymentsModule } from './payments/payments.module';
       useFactory: () => {
         const config = configuration();
         return {
+          // Named 'default' so auth.controller.ts's stricter per-route
+          // @Throttle({ default: { ... } }) overrides target this exact
+          // bucket, rather than silently stacking a second one. See
+          // configuration.ts (defaultThrottle vs authThrottle) and
+          // /SECURITY.md.
           throttlers: [
             {
-              ttl: config.authThrottle.ttlSeconds * 1000,
-              limit: config.authThrottle.limit,
+              name: 'default',
+              ttl: config.defaultThrottle.ttlSeconds * 1000,
+              limit: config.defaultThrottle.limit,
             },
           ],
-        } as { throttlers: { ttl: number; limit: number }[] };
+        };
       },
     }),
     PrismaModule,
@@ -67,12 +76,15 @@ import { PaymentsModule } from './payments/payments.module';
     PharmacyModule,
     BillingModule,
     PaymentsModule,
+    ConnectModule,
+    MetricsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
   ],
 })

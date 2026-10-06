@@ -16,6 +16,10 @@ export interface AppConfig {
     ttlSeconds: number;
     limit: number;
   };
+  defaultThrottle: {
+    ttlSeconds: number;
+    limit: number;
+  };
 }
 
 export default (): AppConfig => ({
@@ -35,5 +39,16 @@ export default (): AppConfig => ({
   authThrottle: {
     ttlSeconds: parseInt(process.env.AUTH_THROTTLE_TTL_SECONDS ?? '60', 10),
     limit: parseInt(process.env.AUTH_THROTTLE_LIMIT ?? '10', 10),
+  },
+  // The global per-route-per-IP budget (master doc Part 5 "rate limiting").
+  // Deliberately far more generous than authThrottle: it exists to blunt
+  // basic flooding/DoS, not to rate-limit normal use — a patient polling
+  // GET /patient/queue or browsing GET /discover/hospitals must never hit
+  // this. The STRICT brute-force budget (authThrottle) is applied only to
+  // login/register/register-patient/refresh via @Throttle() overrides —
+  // see auth.controller.ts.
+  defaultThrottle: {
+    ttlSeconds: parseInt(process.env.DEFAULT_THROTTLE_TTL_SECONDS ?? '60', 10),
+    limit: parseInt(process.env.DEFAULT_THROTTLE_LIMIT ?? '120', 10),
   },
 });
