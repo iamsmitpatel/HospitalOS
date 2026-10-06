@@ -1,7 +1,10 @@
-// HospitalOS - Phase 1 (Foundation) + Phase 1B (Patient) schema.
+// HospitalOS - Phase 1 (Foundation) + Phase 1B (Patient) + Phase 3 (Hospital
+// Operations Core) schema.
 // Scope: tenancy (Hospital), identity (User), auth session state (RefreshToken),
-// AuditLog, and Patient/MRN. Clinical, scheduling, billing domains are deliberately
-// out of scope until their respective phases (see /DECISIONS.md and the master roadmap).
+// AuditLog, Patient/MRN, Department, DoctorProfile/Schedule/Unavailability,
+// Appointment, and Queue/QueueEntry. Clinical notes, prescriptions, laboratory,
+// pharmacy, and billing domains are deliberately out of scope until their
+// respective phases (see /DECISIONS.md and the master roadmap).
 
 generator client {
   provider = "prisma-client-js"
@@ -40,6 +43,47 @@ enum Gender {
   UNKNOWN
 }
 
+enum DoctorStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+// Deliberately smaller than the master doc's full example list for this
+// phase's actually-implemented flow (see /DECISIONS.md): CHECKED_IN exists
+// for future granularity but Phase 3's check-in action moves a caller
+// straight from SCHEDULED/CONFIRMED to IN_QUEUE, creating the QueueEntry in
+// the same transaction.
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  CHECKED_IN
+  IN_QUEUE
+  IN_CONSULTATION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum QueueEntryStatus {
+  WAITING
+  CALLED
+  IN_CONSULTATION
+  COMPLETED
+  SKIPPED
+  CANCELLED
+}
+
 // ---------------------------------------------------------------------------
 // Tenancy
 // ---------------------------------------------------------------------------
@@ -60,13 +104,24 @@ model Hospital {
   // MRN twice — see patients/patients.service.ts and /DECISIONS.md.
   mrnSequence Int    @default(0)
 
+  // IANA timezone name. HospitalOS targets India initially (master doc §34);
+  // defaulting here rather than requiring every hospital to set it explicitly
+  // keeps onboarding simple while still making the field explicit and
+  // overridable per hospital. All DoctorSchedule wall-clock times are
+  // interpreted in this timezone — see /DATABASE.md.
+  timezone String @default("Asia/Kolkata")
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users     User[]
-  patients  Patient[]
-  auditLogs AuditLog[]
+  users           User[]
+  patients        Patient[]
+  auditLogs       AuditLog[]
+  departments     Department[]
+  doctorProfiles  DoctorProfile[]
+  appointments    Appointment[]
+  queues          Queue[]
 
   @@map("hospitals")
 }
@@ -95,6 +150,7 @@ model User {
   refreshTokens     RefreshToken[]
   auditLogs         AuditLog[]
   registeredPatients Patient[] @relation("PatientRegisteredBy")
+  doctorProfile      DoctorProfile?
 
   @@index([hospitalId])
   @@map("users")
@@ -168,10 +224,249 @@ model Patient {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  appointments Appointment[]
+  queueEntries QueueEntry[]
+
   @@unique([hospitalId, mrn])
   @@index([hospitalId, lastName, firstName])
   @@index([hospitalId, phone])
   @@map("patients")
+}
+
+// ---------------------------------------------------------------------------
+// Hospital operations: Department, Doctor, Schedule
+// ---------------------------------------------------------------------------
+
+model Department {
+  id         String @id @default(uuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  name        String
+  // Short code, e.g. "CARD" for Cardiology. Unique per hospital, not globally.
+  code        String
+  description String?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  doctorProfiles DoctorProfile[]
+  appointments   Appointment[]
+  queues         Queue[]
+
+  @@unique([hospitalId, code])
+  @@unique([hospitalId, name])
+  @@index([hospitalId])
+  @@map("departments")
+}
+
+model DoctorProfile {
+  id String @id @default(uuid())
+
+  // One DoctorProfile per User (master doc §11: a doctor is a User plus a
+  // DoctorProfile, not a separate identity). The User must already exist
+  // with role=DOCTOR before a profile can be attached — see doctors.service.ts.
+  userId String   @unique
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  specialization String
+  displayName    String
+
+  // Professional registration/license identifier. Optional (not every
+  // deployment context has one on file at onboarding time), format NOT
+  // validated beyond basic length/charset (master doc §13: "do not assume a
+  // universal format," "do not claim regulatory verification"). Unique per
+  // hospital, not globally — see /DECISIONS.md.
+  registrationNumber String?
+
+  status DoctorStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  schedules        DoctorSchedule[]
+  unavailabilities DoctorUnavailability[]
+  appointments     Appointment[]
+  queues           Queue[]
+
+  @@unique([hospitalId, registrationNumber])
+  @@index([hospitalId, departmentId])
+  @@map("doctor_profiles")
+}
+
+model DoctorSchedule {
+  id              String        @id @default(uuid())
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Cascade)
+
+  dayOfWeek DayOfWeek
+
+  // Wall-clock "HH:mm" (24h), interpreted in the owning Hospital's timezone
+  // (master doc §34) — NOT a DateTime, because this is a recurring weekly
+  // pattern independent of any specific calendar date or DST transition.
+  startTime String
+  endTime   String
+
+  slotDurationMinutes Int     @default(15)
+  isActive            Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([doctorProfileId, dayOfWeek])
+  @@map("doctor_schedules")
+}
+
+model DoctorUnavailability {
+  id              String        @id @default(uuid())
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Cascade)
+
+  // Absolute instants (leave/holiday/blocked time is date-specific, unlike
+  // the recurring DoctorSchedule above).
+  startAt DateTime
+  endAt   DateTime
+  reason  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([doctorProfileId, startAt, endAt])
+  @@map("doctor_unavailabilities")
+}
+
+// ---------------------------------------------------------------------------
+// Appointments
+// ---------------------------------------------------------------------------
+
+model Appointment {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Restrict)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  // Absolute UTC instant. Conflict prevention (master doc §37/§38/§79) is a
+  // partial unique index added by hand to the migration SQL — Prisma's
+  // schema DSL cannot express "unique only when status is active," so it is
+  // not visible here. See /DATABASE.md for the exact constraint and why.
+  scheduledAt     DateTime
+  durationMinutes Int      @default(15)
+
+  status AppointmentStatus @default(SCHEDULED)
+
+  // Patient-provided reason for the visit only (e.g. "annual checkup") —
+  // never a diagnosis or clinical note; those are out of scope until a later
+  // phase (master doc §3).
+  reason String?
+
+  cancelledAt        DateTime?
+  cancelledByUserId  String?
+  cancellationReason String?
+
+  // Points at the OLD appointment this one replaced via reschedule, forming
+  // a traceable chain rather than overwriting history (master doc §42/§43).
+  rescheduledFromId String?      @unique
+  rescheduledFrom   Appointment? @relation("AppointmentReschedule", fields: [rescheduledFromId], references: [id], onDelete: SetNull)
+  rescheduledTo     Appointment? @relation("AppointmentReschedule")
+
+  bookedByUserId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  queueEntry QueueEntry?
+
+  @@index([hospitalId, doctorProfileId, scheduledAt])
+  @@index([hospitalId, patientId])
+  @@index([hospitalId, status])
+  @@map("appointments")
+}
+
+// ---------------------------------------------------------------------------
+// Queue
+// ---------------------------------------------------------------------------
+
+model Queue {
+  id         String @id @default(uuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  doctorProfileId String?
+  doctorProfile   DoctorProfile? @relation(fields: [doctorProfileId], references: [id], onDelete: SetNull)
+
+  // The operating day this queue represents. One queue per doctor per day,
+  // get-or-created on first check-in rather than requiring a separate manual
+  // creation step — see /DECISIONS.md.
+  queueDate DateTime @db.Date
+
+  // Atomic per-queue token counter, same pattern as Hospital.mrnSequence —
+  // incremented via a transactional UPDATE ... increment when a QueueEntry
+  // is created, so concurrent check-ins never collide (master doc §47).
+  nextTokenNumber Int @default(1)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries QueueEntry[]
+
+  @@unique([hospitalId, doctorProfileId, queueDate])
+  @@index([hospitalId, queueDate])
+  @@map("queues")
+}
+
+model QueueEntry {
+  id      String @id @default(uuid())
+  queueId String
+  queue   Queue  @relation(fields: [queueId], references: [id], onDelete: Cascade)
+
+  appointmentId String?      @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  tokenNumber Int
+
+  status QueueEntryStatus @default(WAITING)
+
+  // 0 = normal. Higher = more urgent. Staff-assigned only — see
+  // queue.service.ts and /SECURITY.md (master doc §49: patients cannot
+  // self-assign priority).
+  priority Int @default(0)
+
+  joinedAt       DateTime  @default(now())
+  calledAt       DateTime?
+  calledByUserId String?
+  completedAt    DateTime?
+  skippedAt      DateTime?
+  cancelledAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([queueId, tokenNumber])
+  @@index([queueId, status])
+  @@map("queue_entries")
 }
 
 // ---------------------------------------------------------------------------
