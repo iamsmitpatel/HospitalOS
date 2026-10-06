@@ -16,10 +16,36 @@ export async function createTestApp(): Promise<INestApplication> {
 export async function resetDatabase(app: INestApplication): Promise<void> {
   const prisma = app.get(PrismaService);
   // Children before parents to satisfy FK constraints (Restrict on most
-  // Phase 3 relations means deletion order matters — see /DATABASE.md).
+  // relations means deletion order matters — see /DATABASE.md). Phase 4
+  // tables are wiped before the Phase 3 tables they reference.
   await prisma.$transaction([
     prisma.auditLog.deleteMany(),
     prisma.refreshToken.deleteMany(),
+    // Payments/Billing
+    prisma.refund.deleteMany(),
+    prisma.payment.deleteMany(),
+    prisma.invoiceItem.deleteMany(),
+    prisma.invoice.deleteMany(),
+    prisma.servicePrice.deleteMany(),
+    prisma.service.deleteMany(),
+    // Pharmacy
+    prisma.dispenseRecord.deleteMany(),
+    prisma.stockMovement.deleteMany(),
+    prisma.stockBatch.deleteMany(),
+    prisma.medicine.deleteMany(),
+    // Laboratory
+    prisma.labResult.deleteMany(),
+    prisma.labOrderItem.deleteMany(),
+    prisma.labOrder.deleteMany(),
+    prisma.labTest.deleteMany(),
+    // Clinical
+    prisma.prescriptionItem.deleteMany(),
+    prisma.prescription.deleteMany(),
+    prisma.diagnosis.deleteMany(),
+    prisma.clinicalNote.deleteMany(),
+    prisma.vitalSigns.deleteMany(),
+    prisma.encounter.deleteMany(),
+    // Phase 3
     prisma.queueEntry.deleteMany(),
     prisma.queue.deleteMany(),
     prisma.appointment.deleteMany(),
