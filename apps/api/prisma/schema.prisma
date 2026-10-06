@@ -1,10 +1,13 @@
 // HospitalOS - Phase 1 (Foundation) + Phase 1B (Patient) + Phase 3 (Hospital
-// Operations Core) schema.
+// Operations Core) + Phase 4 (Clinical/Laboratory/Pharmacy/Financial Core) schema.
 // Scope: tenancy (Hospital), identity (User), auth session state (RefreshToken),
 // AuditLog, Patient/MRN, Department, DoctorProfile/Schedule/Unavailability,
-// Appointment, and Queue/QueueEntry. Clinical notes, prescriptions, laboratory,
-// pharmacy, and billing domains are deliberately out of scope until their
-// respective phases (see /DECISIONS.md and the master roadmap).
+// Appointment, Queue/QueueEntry, Encounter/VitalSigns/ClinicalNote/Diagnosis/
+// Prescription, LabTest/LabOrder/LabResult, Medicine/StockBatch/StockMovement/
+// DispenseRecord, Service/ServicePrice/Invoice/InvoiceItem, Payment/Refund.
+// AI diagnosis, insurance automation, advanced accounting, telemedicine, and
+// HospitalOS Connect are deliberately out of scope until their respective
+// phases (see /DECISIONS.md and the master roadmap).
 
 generator client {
   provider = "prisma-client-js"
@@ -84,6 +87,126 @@ enum QueueEntryStatus {
   CANCELLED
 }
 
+// Created directly as IN_PROGRESS in practice — OPEN exists for future
+// granularity but has no Phase 4 trigger, same pattern as Phase 3's unused
+// CHECKED_IN. See /DECISIONS.md.
+enum EncounterStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// Shared shape for Diagnosis and Prescription (two separate enums, not one
+// shared type, so each state machine can evolve independently even though
+// today's values match): a record is mutable only while DRAFT, immutable
+// once FINALIZED, and corrections after that create a new row via the
+// amendedFromId chain rather than overwriting (master doc §14/§16/§20/§33).
+enum DiagnosisStatus {
+  DRAFT
+  FINALIZED
+  AMENDED
+  CANCELLED
+}
+
+enum PrescriptionStatus {
+  DRAFT
+  FINALIZED
+  AMENDED
+  CANCELLED
+}
+
+enum LabOrderStatus {
+  ORDERED
+  COLLECTED
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}
+
+enum LabOrderItemStatus {
+  ORDERED
+  COLLECTED
+  COMPLETED
+  CANCELLED
+}
+
+// Entered -> Reviewed -> Verified is the master doc §32 workflow; a result
+// should not become final merely because someone typed a value in.
+enum LabResultStatus {
+  ENTERED
+  REVIEWED
+  VERIFIED
+  AMENDED
+}
+
+enum LabResultFlag {
+  NORMAL
+  LOW
+  HIGH
+  CRITICAL
+}
+
+enum StockBatchStatus {
+  ACTIVE
+  EXPIRED
+  DEPLETED
+}
+
+enum StockMovementType {
+  PURCHASE
+  ADJUSTMENT
+  DISPENSE
+  RETURN
+  EXPIRED
+  TRANSFER
+}
+
+enum ServiceCategory {
+  CONSULTATION
+  LABORATORY
+  PROCEDURE
+  IMAGING
+  PHARMACY
+  OTHER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  BANK_TRANSFER
+  OTHER
+}
+
+// Phase 4 has no real payment gateway integration (none is in scope — see
+// /DECISIONS.md), so payments are created directly as SUCCESS by staff
+// confirming receipt (e.g. cash handed over, card charged on a separate POS
+// terminal). PENDING/FAILED are modeled for a future gateway integration but
+// are not reachable via any Phase 4 endpoint today.
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum RefundStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
 // ---------------------------------------------------------------------------
 // Tenancy
 // ---------------------------------------------------------------------------
@@ -104,6 +227,10 @@ model Hospital {
   // MRN twice — see patients/patients.service.ts and /DECISIONS.md.
   mrnSequence Int    @default(0)
 
+  // Monotonic per-hospital counter backing invoice numbering — identical
+  // atomic-increment pattern to mrnSequence above, see invoices.service.ts.
+  invoiceSequence Int @default(0)
+
   // IANA timezone name. HospitalOS targets India initially (master doc §34);
   // defaulting here rather than requiring every hospital to set it explicitly
   // keeps onboarding simple while still making the field explicit and
@@ -122,6 +249,23 @@ model Hospital {
   doctorProfiles  DoctorProfile[]
   appointments    Appointment[]
   queues          Queue[]
+  encounters      Encounter[]
+  vitalSigns      VitalSigns[]
+  clinicalNotes   ClinicalNote[]
+  diagnoses       Diagnosis[]
+  prescriptions   Prescription[]
+  labTests        LabTest[]
+  labOrders       LabOrder[]
+  labResults      LabResult[]
+  medicines       Medicine[]
+  stockBatches    StockBatch[]
+  stockMovements  StockMovement[]
+  dispenseRecords DispenseRecord[]
+  services        Service[]
+  servicePrices   ServicePrice[]
+  invoices        Invoice[]
+  payments        Payment[]
+  refunds         Refund[]
 
   @@map("hospitals")
 }
@@ -226,6 +370,15 @@ model Patient {
 
   appointments Appointment[]
   queueEntries QueueEntry[]
+  encounters      Encounter[]
+  vitalSigns      VitalSigns[]
+  clinicalNotes   ClinicalNote[]
+  diagnoses       Diagnosis[]
+  prescriptions   Prescription[]
+  labOrders       LabOrder[]
+  labResults      LabResult[]
+  invoices        Invoice[]
+  dispenseRecords DispenseRecord[]
 
   @@unique([hospitalId, mrn])
   @@index([hospitalId, lastName, firstName])
@@ -254,6 +407,7 @@ model Department {
   doctorProfiles DoctorProfile[]
   appointments   Appointment[]
   queues         Queue[]
+  encounters     Encounter[]
 
   @@unique([hospitalId, code])
   @@unique([hospitalId, name])
@@ -295,6 +449,9 @@ model DoctorProfile {
   unavailabilities DoctorUnavailability[]
   appointments     Appointment[]
   queues           Queue[]
+  encounters       Encounter[]
+  prescriptions    Prescription[]
+  labOrders        LabOrder[]
 
   @@unique([hospitalId, registrationNumber])
   @@index([hospitalId, departmentId])
@@ -390,6 +547,7 @@ model Appointment {
   updatedAt DateTime @updatedAt
 
   queueEntry QueueEntry?
+  encounter  Encounter?
 
   @@index([hospitalId, doctorProfileId, scheduledAt])
   @@index([hospitalId, patientId])
@@ -467,6 +625,685 @@ model QueueEntry {
   @@unique([queueId, tokenNumber])
   @@index([queueId, status])
   @@map("queue_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Clinical: Encounter, Vitals, Clinical Notes, Diagnosis, Prescription
+// ---------------------------------------------------------------------------
+
+model Encounter {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Restrict)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  // Optional: an encounter can be created directly (walk-in) without a prior
+  // appointment, though the normal flow is Appointment -> check-in -> Queue
+  // -> Encounter (master doc §9). When present, patient/doctor/department
+  // above are server-derived FROM the appointment, never trusted from the
+  // request body — see encounters.service.ts.
+  appointmentId String?      @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  status EncounterStatus @default(IN_PROGRESS)
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vitalSigns    VitalSigns[]
+  clinicalNotes ClinicalNote[]
+  diagnoses     Diagnosis[]
+  prescriptions Prescription[]
+  labOrders     LabOrder[]
+  invoices      Invoice[]
+
+  @@index([hospitalId, patientId])
+  @@index([hospitalId, doctorProfileId])
+  @@index([hospitalId, status])
+  @@map("encounters")
+}
+
+model VitalSigns {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  // Structured, typed fields rather than free text (master doc §11). All
+  // optional — a given observation round may not capture every measurement.
+  // Storage ranges are enforced in the DTO (plausible physiological bounds,
+  // not a rejection of unusual-but-real values — master doc §12); clinical
+  // judgment belongs to clinicians, not this layer.
+  bloodPressureSystolic  Int?
+  bloodPressureDiastolic Int?
+  heartRateBpm            Int?
+  temperatureCelsius      Decimal? @db.Decimal(4, 1)
+  respiratoryRate         Int?
+  oxygenSaturationPercent Int?
+  weightKg                Decimal? @db.Decimal(5, 2)
+  heightCm                Decimal? @db.Decimal(5, 1)
+
+  recordedByUserId String
+  recordedAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  @@index([hospitalId, encounterId])
+  @@index([hospitalId, patientId])
+  @@map("vital_signs")
+}
+
+model ClinicalNote {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  // Structured SOAP-style sections (master doc §13). "plan" also captures
+  // the treatment plan — a separate TreatmentPlan model would duplicate
+  // this field for no structural benefit; see /DECISIONS.md.
+  chiefComplaint String?
+  history        String?
+  examination    String?
+  assessment     String?
+  plan           String?
+
+  authorUserId String
+
+  // Append-only: there is deliberately no update endpoint for an existing
+  // note (master doc §14 — "a later correction should not erase the fact
+  // that an earlier record existed"). A correction creates a NEW row
+  // referencing the one it supersedes, never mutates the original.
+  correctsId  String?       @unique
+  corrects    ClinicalNote? @relation("ClinicalNoteCorrection", fields: [correctsId], references: [id], onDelete: SetNull)
+  correctedBy ClinicalNote? @relation("ClinicalNoteCorrection")
+
+  createdAt DateTime @default(now())
+
+  @@index([hospitalId, encounterId])
+  @@index([hospitalId, patientId])
+  @@map("clinical_notes")
+}
+
+model Diagnosis {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  description String
+
+  // Free-text, optional external code (e.g. an ICD-10 code the clinician
+  // already knows) — never validated against or auto-populated from a real
+  // coding system, which this platform does not implement (master doc §15:
+  // "do not invent medical codes").
+  diagnosisCode String?
+  // e.g. "primary"/"secondary"/"differential" — free text, not an enum, to
+  // avoid prematurely fixing a taxonomy nothing requires yet.
+  type          String?
+
+  status DiagnosisStatus @default(DRAFT)
+
+  recordedByUserId String
+  recordedAt       DateTime  @default(now())
+  finalizedAt      DateTime?
+
+  // Same amendment-chain pattern as Appointment.rescheduledFromId (Phase 3):
+  // a correction after finalization creates a new row; the old one is
+  // marked AMENDED, never overwritten (master doc §16/§33).
+  amendedFromId String?     @unique
+  amendedFrom   Diagnosis?  @relation("DiagnosisAmendment", fields: [amendedFromId], references: [id], onDelete: SetNull)
+  amendedTo     Diagnosis?  @relation("DiagnosisAmendment")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([hospitalId, encounterId])
+  @@index([hospitalId, patientId])
+  @@map("diagnoses")
+}
+
+model Prescription {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Restrict)
+
+  status PrescriptionStatus @default(DRAFT)
+  notes  String?
+
+  // Same amendment-chain pattern as Diagnosis/Appointment — see above.
+  amendedFromId String?        @unique
+  amendedFrom   Prescription?  @relation("PrescriptionAmendment", fields: [amendedFromId], references: [id], onDelete: SetNull)
+  amendedTo     Prescription?  @relation("PrescriptionAmendment")
+
+  createdByUserId String
+  finalizedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items PrescriptionItem[]
+
+  @@index([hospitalId, encounterId])
+  @@index([hospitalId, patientId])
+  @@map("prescriptions")
+}
+
+model PrescriptionItem {
+  id String @id @default(uuid())
+
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+
+  medicineId String
+  medicine   Medicine @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+
+  dosage       String
+  frequency    String
+  duration     String
+  route        String?
+  instructions String?
+  quantity     Int
+
+  createdAt DateTime @default(now())
+
+  dispenseRecords DispenseRecord[]
+
+  @@index([prescriptionId])
+  @@map("prescription_items")
+}
+
+// ---------------------------------------------------------------------------
+// Laboratory: Test Catalog, Order, Result
+// ---------------------------------------------------------------------------
+
+model LabTest {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  name       String
+  code       String
+  category   String?
+  sampleType String?
+  unit       String?
+
+  // Optional numeric reference range for tests with a single expected
+  // numeric band. LabResult.referenceRange (free text) covers qualitative
+  // or multi-range tests this pair can't express — see /DATABASE.md.
+  referenceRangeLow  Decimal? @db.Decimal(10, 3)
+  referenceRangeHigh Decimal? @db.Decimal(10, 3)
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems LabOrderItem[]
+
+  @@unique([hospitalId, code])
+  @@index([hospitalId])
+  @@map("lab_tests")
+}
+
+model LabOrder {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  doctorProfileId String
+  doctorProfile   DoctorProfile @relation(fields: [doctorProfileId], references: [id], onDelete: Restrict)
+
+  status LabOrderStatus @default(ORDERED)
+
+  orderedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items LabOrderItem[]
+
+  @@index([hospitalId, patientId])
+  @@index([hospitalId, status])
+  @@map("lab_orders")
+}
+
+model LabOrderItem {
+  id String @id @default(uuid())
+
+  labOrderId String
+  labOrder   LabOrder @relation(fields: [labOrderId], references: [id], onDelete: Cascade)
+
+  labTestId String
+  labTest   LabTest @relation(fields: [labTestId], references: [id], onDelete: Restrict)
+
+  status LabOrderItemStatus @default(ORDERED)
+
+  // Specimen tracking folded directly onto the order item rather than a
+  // separate Specimen table — one specimen maps to one ordered test in this
+  // phase's scope, and a join table added no benefit (master doc §30: "do
+  // not create unnecessary specimen complexity"). See /DECISIONS.md.
+  specimenType      String?
+  collectedAt       DateTime?
+  collectedByUserId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  result LabResult?
+
+  @@index([labOrderId])
+  @@index([labTestId])
+  @@map("lab_order_items")
+}
+
+model LabResult {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  labOrderItemId String       @unique
+  labOrderItem   LabOrderItem @relation(fields: [labOrderItemId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  value String
+  unit  String?
+  // Snapshot of the test's reference range at result-entry time, not a live
+  // join to LabTest — never recomputed from a possibly-changed catalog
+  // value later (the same historical-value-preservation principle master
+  // doc §38 states for billing, applied here too).
+  referenceRange String?
+  flag           LabResultFlag?
+
+  status LabResultStatus @default(ENTERED)
+
+  enteredByUserId String
+  enteredAt       DateTime @default(now())
+
+  // Maker-checker: verifiedByUserId must differ from enteredByUserId,
+  // enforced in lab.service.ts, not just by convention (master doc §32).
+  verifiedByUserId String?
+  verifiedAt       DateTime?
+
+  // Same amendment-chain pattern as Diagnosis/Prescription — a correction
+  // to a VERIFIED result creates a new row rather than overwriting it
+  // (master doc §33).
+  amendsId  String?     @unique
+  amends    LabResult?  @relation("LabResultAmendment", fields: [amendsId], references: [id], onDelete: SetNull)
+  amendedBy LabResult?  @relation("LabResultAmendment")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([hospitalId, patientId])
+  @@map("lab_results")
+}
+
+// ---------------------------------------------------------------------------
+// Pharmacy: Medicine Catalog, Batch Inventory, Dispensing
+// ---------------------------------------------------------------------------
+
+model Medicine {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  name        String
+  genericName String?
+  brandName   String?
+  strength    String?
+  // e.g. "tablet", "syrup", "injection" — free text, not an enum: the set of
+  // forms varies by hospital and this platform doesn't claim to enumerate
+  // every pharmaceutical dosage form (master doc §21).
+  form        String?
+  unit        String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stockBatches      StockBatch[]
+  stockMovements    StockMovement[]
+  prescriptionItems PrescriptionItem[]
+
+  @@index([hospitalId, name])
+  @@map("medicines")
+}
+
+model StockBatch {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  medicineId String
+  medicine   Medicine @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+
+  batchNumber String
+
+  quantityReceived Int
+  // Live balance, decremented atomically on dispense via a conditional
+  // UPDATE ... WHERE quantityRemaining >= $qty (master doc §24/§25) — a
+  // hand-added CHECK constraint additionally enforces quantityRemaining >= 0
+  // at the database level as a backstop; see /DATABASE.md.
+  quantityRemaining Int
+
+  expiryDate    DateTime @db.Date
+  purchasePrice Decimal? @db.Decimal(10, 2)
+
+  status StockBatchStatus @default(ACTIVE)
+
+  receivedAt      DateTime @default(now())
+  createdByUserId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  stockMovements  StockMovement[]
+  dispenseRecords DispenseRecord[]
+
+  @@unique([hospitalId, medicineId, batchNumber])
+  @@index([hospitalId, medicineId, expiryDate])
+  @@index([hospitalId, status])
+  @@map("stock_batches")
+}
+
+model StockMovement {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  medicineId String
+  medicine   Medicine @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+
+  stockBatchId String
+  stockBatch   StockBatch @relation(fields: [stockBatchId], references: [id], onDelete: Restrict)
+
+  type StockMovementType
+
+  // Signed: positive for increases (PURCHASE/RETURN/an upward ADJUSTMENT),
+  // negative for decreases (DISPENSE/EXPIRED/TRANSFER/a downward
+  // ADJUSTMENT) — one field covers every movement type unambiguously and
+  // makes "current stock = sum of movements" trivially true (master doc §23).
+  quantityDelta Int
+
+  // Loose pointer, not an enforced FK — the referenced entity varies by
+  // movement type (e.g. a DispenseRecord id for DISPENSE movements).
+  referenceType String?
+  referenceId   String?
+  notes         String?
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  @@index([hospitalId, medicineId, createdAt])
+  @@index([stockBatchId])
+  @@map("stock_movements")
+}
+
+model DispenseRecord {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  prescriptionItemId String
+  prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id], onDelete: Restrict)
+
+  stockBatchId String
+  stockBatch   StockBatch @relation(fields: [stockBatchId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  quantity Int
+
+  dispensedByUserId String
+  dispensedAt       DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  @@index([hospitalId, patientId])
+  @@index([prescriptionItemId])
+  @@map("dispense_records")
+}
+
+// ---------------------------------------------------------------------------
+// Billing: Service Catalog, Pricing, Invoice
+// ---------------------------------------------------------------------------
+
+model Service {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  name     String
+  code     String
+  category ServiceCategory @default(OTHER)
+  isActive Boolean         @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  prices       ServicePrice[]
+  invoiceItems InvoiceItem[]
+
+  @@unique([hospitalId, code])
+  @@index([hospitalId, isActive])
+  @@map("services")
+}
+
+model ServicePrice {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  amount   Decimal @db.Decimal(10, 2)
+  currency String  @default("INR")
+
+  // The "current" price is the row with effectiveTo = null. Creating a new
+  // price closes out the previous one's effectiveTo in the same transaction
+  // (billing.service.ts) — never mutates an existing price in place, and
+  // never affects InvoiceItems already created against the old price
+  // (master doc §37/§38).
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([hospitalId, serviceId, effectiveTo])
+  @@map("service_prices")
+}
+
+model Invoice {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Restrict)
+
+  encounterId String?
+  encounter   Encounter? @relation(fields: [encounterId], references: [id], onDelete: SetNull)
+
+  // Hospital-scoped, human-readable — same atomic-counter pattern as MRN/
+  // queue tokens (Hospital.invoiceSequence). Not globally unique.
+  invoiceNumber String
+
+  status InvoiceStatus @default(DRAFT)
+
+  // All monetary fields use Decimal, never float/Int-as-cents shortcuts
+  // (master doc §40). See /DATABASE.md for the exact calculation and
+  // rounding policy. Hand-added CHECK constraints enforce total >= 0,
+  // amountPaid >= 0, amountRefunded >= 0 at the database level (master doc §44).
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxRate        Decimal @default(0) @db.Decimal(5, 4)
+  taxAmount      Decimal @db.Decimal(12, 2)
+  total          Decimal @db.Decimal(12, 2)
+
+  // Running balances, updated transactionally alongside Payment/Refund
+  // creation — not recomputed by summing on every read.
+  amountPaid     Decimal @default(0) @db.Decimal(12, 2)
+  amountRefunded Decimal @default(0) @db.Decimal(12, 2)
+
+  currency String @default("INR")
+
+  issuedAt        DateTime?
+  createdByUserId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items    InvoiceItem[]
+  payments Payment[]
+  refunds  Refund[]
+
+  @@unique([hospitalId, invoiceNumber])
+  @@index([hospitalId, patientId])
+  @@index([hospitalId, status])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  // Nullable, loose reference only — the fields below are the historical
+  // source of truth (master doc §41), never reconstructed by joining back
+  // to the live Service/ServicePrice catalog.
+  serviceId String?
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  description    String
+  quantity       Int     @default(1)
+  unitPrice      Decimal @db.Decimal(10, 2)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
+  lineTotal      Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+// ---------------------------------------------------------------------------
+// Payments
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  amount Decimal       @db.Decimal(12, 2)
+  method PaymentMethod
+  status PaymentStatus @default(SUCCESS)
+
+  // External/physical-terminal transaction reference only — never a raw
+  // card number or CVV (master doc §48; neither is ever stored anywhere in
+  // this schema).
+  referenceNumber String?
+
+  // Client-supplied, unique per hospital when present — a retried request
+  // with the same key returns the original payment instead of creating a
+  // second one (master doc §47). Nullable so calls without a key aren't
+  // constrained against each other (Postgres treats multiple NULLs in a
+  // unique index as distinct).
+  idempotencyKey String?
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  refunds Refund[]
+
+  @@unique([hospitalId, idempotencyKey])
+  @@index([hospitalId, invoiceId])
+  @@index([hospitalId, status])
+  @@map("payments")
+}
+
+model Refund {
+  id String @id @default(uuid())
+
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  amount Decimal      @db.Decimal(12, 2)
+  reason String?
+  status RefundStatus @default(COMPLETED)
+
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  @@index([hospitalId, invoiceId])
+  @@map("refunds")
 }
 
 // ---------------------------------------------------------------------------
