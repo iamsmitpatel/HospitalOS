@@ -9,6 +9,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.constants';
 import { PatientsService } from '../patients/patients.service';
 import { DoctorsService } from '../doctors/doctors.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { UpdateAppointmentDto } from './dto/update-appointment.dto';
 import { CancelAppointmentDto } from './dto/cancel-appointment.dto';
@@ -63,6 +64,7 @@ export class AppointmentsService {
     private readonly auditService: AuditService,
     private readonly patientsService: PatientsService,
     private readonly doctorsService: DoctorsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async create(
@@ -175,6 +177,245 @@ export class AppointmentsService {
     });
 
     return this.toResponse(appointment);
+  }
+
+  /**
+   * HospitalOS Connect (Phase 5): the patient-facing counterpart to create()
+   * above, kept as a SEPARATE method rather than threading PATIENT-role
+   * support through the staff path — staff booking resolves everything
+   * against actor.hospitalId; a Connect patient has no hospitalId at all
+   * and may book across many hospitals, so the hospital here comes from
+   * the chosen doctor instead. Reuses the exact same slot-availability
+   * computation (DoctorsService#getPublicAvailableSlots, itself sharing
+   * computeAvailableSlots with the staff path — see /DECISIONS.md) and the
+   * same partial-unique-index race backstop, plus a second one for
+   * idempotencyKey (master doc Part 4 "BOOKING CONCURRENCY" — a retried
+   * request with the same key must not create a duplicate appointment).
+   */
+  async createForConnectPatient(
+    dto: {
+      doctorProfileId: string;
+      scheduledAt: string;
+      durationMinutes?: number;
+      reason?: string;
+      idempotencyKey?: string;
+    },
+    connectUserId: string,
+    correlationId?: string,
+  ): Promise<AppointmentResponseDto> {
+    const doctor = await this.doctorsService.getPubliclyVisibleDoctorOrThrow(dto.doctorProfileId);
+    const hospitalId = doctor.hospitalId;
+
+    // Fetched fresh rather than trusted from the JWT: phone/DOB/gender are
+    // edited after registration and the access token is not reissued on
+    // every profile edit, so the token's claims could be stale.
+    const connectUser = await this.prisma.user.findUniqueOrThrow({ where: { id: connectUserId } });
+
+    if (dto.idempotencyKey) {
+      const existing = await this.prisma.appointment.findUnique({
+        where: { hospitalId_idempotencyKey: { hospitalId, idempotencyKey: dto.idempotencyKey } },
+      });
+      if (existing) {
+        return this.toResponse(existing);
+      }
+    }
+
+    const patient = await this.patientsService.getOrCreateForConnectUser(
+      hospitalId,
+      connectUser,
+      correlationId,
+    );
+
+    const scheduledAt = new Date(dto.scheduledAt);
+    if (scheduledAt.getTime() <= Date.now()) {
+      throw new AppException(
+        'APPOINTMENT_IN_PAST',
+        'Cannot book an appointment in the past.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const hospital = await this.prisma.hospital.findUniqueOrThrow({ where: { id: hospitalId } });
+    const hospitalDate = getZonedDateParts(hospital.timezone, scheduledAt).date;
+    const availableSlots = await this.doctorsService.getPublicAvailableSlots(
+      doctor.id,
+      hospitalDate,
+    );
+    if (!availableSlots.includes(scheduledAt.toISOString())) {
+      throw new AppException(
+        'SLOT_NOT_AVAILABLE',
+        'The requested time is not an available slot for this doctor.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    let appointment: Appointment;
+    try {
+      appointment = await this.prisma.appointment.create({
+        data: {
+          hospitalId,
+          patientId: patient.id,
+          doctorProfileId: doctor.id,
+          departmentId: doctor.departmentId,
+          scheduledAt,
+          durationMinutes: dto.durationMinutes ?? 15,
+          reason: dto.reason,
+          bookedByUserId: connectUser.id,
+          idempotencyKey: dto.idempotencyKey,
+        },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        // Disambiguate which unique constraint actually fired: an
+        // idempotency-key collision from a genuine concurrent retry should
+        // return the ORIGINAL booking, not an error — a slot collision
+        // (a different request, same doctor+time) should still surface as
+        // a conflict. Re-querying by idempotencyKey, not by matching on
+        // Prisma's error metadata, keeps this correct regardless of
+        // Prisma/Postgres version differences in how that metadata is shaped.
+        if (dto.idempotencyKey) {
+          const existing = await this.prisma.appointment.findUnique({
+            where: {
+              hospitalId_idempotencyKey: { hospitalId, idempotencyKey: dto.idempotencyKey },
+            },
+          });
+          if (existing) {
+            return this.toResponse(existing);
+          }
+        }
+        throw new AppException(
+          'SLOT_ALREADY_BOOKED',
+          'This slot was just booked by someone else. Please choose another.',
+          HttpStatus.CONFLICT,
+        );
+      }
+      throw error;
+    }
+
+    await this.auditService.log({
+      action: AuditAction.CONNECT_APPOINTMENT_BOOKED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: connectUser.id,
+      hospitalId,
+      resourceType: 'Appointment',
+      resourceId: appointment.id,
+      correlationId,
+    });
+
+    await this.notificationsService.notify({
+      type: 'APPOINTMENT_BOOKED',
+      channel: 'EMAIL',
+      to: connectUser.email,
+      subject: 'Appointment confirmed',
+      body: `Your appointment is confirmed for ${scheduledAt.toISOString()}.`,
+      hospitalId,
+      recipientUserId: connectUser.id,
+      triggeredByUserId: connectUser.id,
+      correlationId,
+    });
+
+    return this.toResponse(appointment);
+  }
+
+  /** Every Patient row linked to this Connect account, across every hospital they've used. */
+  async listForConnectUser(connectUserId: string): Promise<AppointmentResponseDto[]> {
+    const patients = await this.patientsService.listForConnectUser(connectUserId);
+    if (patients.length === 0) {
+      return [];
+    }
+    const appointments = await this.prisma.appointment.findMany({
+      where: { patientId: { in: patients.map((p) => p.id) } },
+      orderBy: { scheduledAt: 'desc' },
+    });
+    return appointments.map((a) => this.toResponse(a));
+  }
+
+  async getOwnAppointmentForConnectUserOrThrow(
+    id: string,
+    connectUserId: string,
+  ): Promise<Appointment> {
+    const appointment = await this.prisma.appointment.findUnique({ where: { id } });
+    if (!appointment) {
+      throw new AppException(
+        'APPOINTMENT_NOT_FOUND',
+        'Appointment not found.',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    // Ownership runs through the linked Patient row, never hospitalId — a
+    // Connect user has no hospitalId, so the staff-side tenant check
+    // (getTenantScopedAppointmentOrThrow) can never be reused here.
+    const patient = await this.prisma.patient.findUnique({
+      where: { id: appointment.patientId },
+    });
+    if (!patient || patient.userId !== connectUserId) {
+      throw new AppException(
+        'APPOINTMENT_NOT_FOUND',
+        'Appointment not found.',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return appointment;
+  }
+
+  async getOneForConnectUser(id: string, connectUserId: string): Promise<AppointmentResponseDto> {
+    const appointment = await this.getOwnAppointmentForConnectUserOrThrow(id, connectUserId);
+    return this.toResponse(appointment);
+  }
+
+  async cancelForConnectPatient(
+    id: string,
+    dto: CancelAppointmentDto,
+    connectUserId: string,
+    correlationId?: string,
+  ): Promise<AppointmentResponseDto> {
+    const appointment = await this.getOwnAppointmentForConnectUserOrThrow(id, connectUserId);
+    if (!CANCELLABLE_STATUSES.includes(appointment.status)) {
+      assertTransitionAllowed(appointment.status, 'CANCELLED');
+    }
+    const connectUser = await this.prisma.user.findUniqueOrThrow({ where: { id: connectUserId } });
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.appointment.update({
+        where: { id: appointment.id },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+          cancelledByUserId: connectUserId,
+          cancellationReason: dto.reason,
+        },
+      });
+      await tx.queueEntry.updateMany({
+        where: { appointmentId: appointment.id, status: { in: ['WAITING', 'CALLED'] } },
+        data: { status: 'CANCELLED', cancelledAt: new Date() },
+      });
+      return result;
+    });
+
+    await this.auditService.log({
+      action: AuditAction.APPOINTMENT_CANCELLED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: connectUserId,
+      hospitalId: updated.hospitalId,
+      resourceType: 'Appointment',
+      resourceId: updated.id,
+      correlationId,
+      metadata: { reason: dto.reason },
+    });
+
+    await this.notificationsService.notify({
+      type: 'APPOINTMENT_CANCELLED',
+      channel: 'EMAIL',
+      to: connectUser.email,
+      subject: 'Appointment cancelled',
+      body: `Your appointment has been cancelled.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
+      hospitalId: updated.hospitalId,
+      recipientUserId: connectUserId,
+      triggeredByUserId: connectUserId,
+      correlationId,
+    });
+
+    return this.toResponse(updated);
   }
 
   async findAllForTenant(

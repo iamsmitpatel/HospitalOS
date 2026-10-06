@@ -46,6 +46,7 @@ describe('AppointmentsService', () => {
   let auditService: any;
   let patientsService: any;
   let doctorsService: any;
+  let notificationsService: any;
   let service: AppointmentsService;
 
   const actor: AuthenticatedUser = {
@@ -72,9 +73,22 @@ describe('AppointmentsService', () => {
 
   const FUTURE_SLOT_ISO = '2027-10-11T03:30:00.000Z'; // 09:00 IST, a Monday
 
+  const connectUserRow = {
+    id: 'connect-1',
+    firstName: 'Riya',
+    lastName: 'Shah',
+    email: 'riya@example.com',
+    phone: '+91 90000 00001',
+    dateOfBirth: new Date('1995-01-01'),
+    gender: 'FEMALE',
+  };
+  const connectPatient = { id: 'patient-connect-1', hospitalId: 'hospital-a', userId: 'connect-1' };
+
   beforeEach(() => {
     prisma = {
       hospital: { findUniqueOrThrow: jest.fn().mockResolvedValue(hospital) },
+      user: { findUniqueOrThrow: jest.fn().mockResolvedValue(connectUserRow) },
+      patient: { findUnique: jest.fn().mockResolvedValue(connectPatient) },
       appointment: {
         create: jest.fn(),
         findMany: jest.fn(),
@@ -86,12 +100,25 @@ describe('AppointmentsService', () => {
       $transaction: jest.fn((cb: any) => cb(prisma)),
     };
     auditService = { log: jest.fn() };
-    patientsService = { getTenantScopedPatientOrThrow: jest.fn().mockResolvedValue(activePatient) };
+    patientsService = {
+      getTenantScopedPatientOrThrow: jest.fn().mockResolvedValue(activePatient),
+      getOrCreateForConnectUser: jest.fn().mockResolvedValue(connectPatient),
+      listForConnectUser: jest.fn().mockResolvedValue([connectPatient]),
+    };
     doctorsService = {
       getTenantScopedDoctorOrThrow: jest.fn().mockResolvedValue(activeDoctor),
       getAvailableSlots: jest.fn().mockResolvedValue([FUTURE_SLOT_ISO]),
+      getPubliclyVisibleDoctorOrThrow: jest.fn().mockResolvedValue(activeDoctor),
+      getPublicAvailableSlots: jest.fn().mockResolvedValue([FUTURE_SLOT_ISO]),
     };
-    service = new AppointmentsService(prisma, auditService, patientsService, doctorsService);
+    notificationsService = { notify: jest.fn().mockResolvedValue(undefined) };
+    service = new AppointmentsService(
+      prisma,
+      auditService,
+      patientsService,
+      doctorsService,
+      notificationsService,
+    );
   });
 
   describe('create', () => {
@@ -300,6 +327,186 @@ describe('AppointmentsService', () => {
 
       const result = await service.markNoShow('appt-1', actor);
       expect(result.status).toBe('NO_SHOW');
+    });
+  });
+
+  describe('Phase 5: createForConnectPatient', () => {
+    const bookDto = { doctorProfileId: 'doctor-1', scheduledAt: FUTURE_SLOT_ISO };
+
+    it('resolves the hospital from the doctor, not from an actor.hospitalId (Connect users have none)', async () => {
+      prisma.appointment.create.mockImplementation(({ data }: any) => ({
+        id: 'appt-connect-1',
+        ...data,
+        status: 'SCHEDULED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }));
+
+      await service.createForConnectPatient(bookDto, 'connect-1');
+
+      expect(doctorsService.getPubliclyVisibleDoctorOrThrow).toHaveBeenCalledWith('doctor-1');
+      expect(patientsService.getOrCreateForConnectUser).toHaveBeenCalledWith(
+        'hospital-a',
+        connectUserRow,
+        undefined,
+      );
+      expect(prisma.appointment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            bookedByUserId: 'connect-1',
+            patientId: connectPatient.id,
+          }),
+        }),
+      );
+      expect(notificationsService.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'APPOINTMENT_BOOKED', to: connectUserRow.email }),
+      );
+    });
+
+    it('propagates DOCTOR_NOT_FOUND when the doctor is not publicly visible', async () => {
+      doctorsService.getPubliclyVisibleDoctorOrThrow.mockRejectedValue(
+        new AppException('DOCTOR_NOT_FOUND', 'Doctor not found.', 404),
+      );
+
+      await expect(service.createForConnectPatient(bookDto, 'connect-1')).rejects.toMatchObject({
+        code: 'DOCTOR_NOT_FOUND',
+      });
+    });
+
+    it('rejects a time outside the publicly computed available-slots list', async () => {
+      doctorsService.getPublicAvailableSlots.mockResolvedValue([]);
+
+      await expect(service.createForConnectPatient(bookDto, 'connect-1')).rejects.toMatchObject({
+        code: 'SLOT_NOT_AVAILABLE',
+      });
+    });
+
+    it('short-circuits on a repeated idempotencyKey without creating a second appointment', async () => {
+      const existing = {
+        id: 'appt-original',
+        status: 'SCHEDULED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      prisma.appointment.findUnique.mockResolvedValue(existing);
+
+      const result = await service.createForConnectPatient(
+        { ...bookDto, idempotencyKey: 'key-1' },
+        'connect-1',
+      );
+
+      expect(result.id).toBe('appt-original');
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
+    });
+
+    it('on a P2002 from a genuine slot conflict (no idempotencyKey), surfaces SLOT_ALREADY_BOOKED', async () => {
+      prisma.appointment.create.mockRejectedValue(makeP2002());
+
+      await expect(service.createForConnectPatient(bookDto, 'connect-1')).rejects.toMatchObject({
+        code: 'SLOT_ALREADY_BOOKED',
+      });
+    });
+
+    it('on a P2002 caused by a concurrent retry of the SAME idempotencyKey, returns the original instead of erroring', async () => {
+      prisma.appointment.findUnique.mockResolvedValueOnce(null); // pre-check: no existing yet
+      prisma.appointment.create.mockRejectedValue(makeP2002());
+      const original = {
+        id: 'appt-original',
+        status: 'SCHEDULED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      prisma.appointment.findUnique.mockResolvedValueOnce(original); // re-query after P2002
+
+      const result = await service.createForConnectPatient(
+        { ...bookDto, idempotencyKey: 'key-1' },
+        'connect-1',
+      );
+
+      expect(result.id).toBe('appt-original');
+    });
+  });
+
+  describe('Phase 5: Connect ownership — list/get/cancel', () => {
+    it('listForConnectUser returns appointments across every linked Patient record', async () => {
+      prisma.appointment.findMany.mockResolvedValue([
+        { id: 'appt-1', status: 'SCHEDULED', createdAt: new Date(), updatedAt: new Date() },
+      ]);
+
+      const result = await service.listForConnectUser('connect-1');
+
+      expect(patientsService.listForConnectUser).toHaveBeenCalledWith('connect-1');
+      expect(result).toHaveLength(1);
+    });
+
+    it('listForConnectUser returns [] without querying appointments when the user has no linked patients', async () => {
+      patientsService.listForConnectUser.mockResolvedValue([]);
+
+      const result = await service.listForConnectUser('connect-1');
+
+      expect(result).toEqual([]);
+      expect(prisma.appointment.findMany).not.toHaveBeenCalled();
+    });
+
+    it('getOneForConnectUser returns NOT_FOUND for an appointment owned by a different Connect user', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({ id: 'appt-1', patientId: 'other-patient' });
+      prisma.patient.findUnique.mockResolvedValue({ id: 'other-patient', userId: 'someone-else' });
+
+      await expect(service.getOneForConnectUser('appt-1', 'connect-1')).rejects.toMatchObject({
+        code: 'APPOINTMENT_NOT_FOUND',
+      });
+    });
+
+    it('getOneForConnectUser returns the appointment when it belongs to the caller via the linked Patient row', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({
+        id: 'appt-1',
+        patientId: connectPatient.id,
+        status: 'SCHEDULED',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = await service.getOneForConnectUser('appt-1', 'connect-1');
+      expect(result.id).toBe('appt-1');
+    });
+
+    it('cancelForConnectPatient cancels an owned appointment and its linked queue entry', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({
+        id: 'appt-1',
+        patientId: connectPatient.id,
+        hospitalId: 'hospital-a',
+        status: 'SCHEDULED',
+      });
+      prisma.appointment.update.mockResolvedValue({
+        id: 'appt-1',
+        hospitalId: 'hospital-a',
+        status: 'CANCELLED',
+        scheduledAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await service.cancelForConnectPatient('appt-1', {}, 'connect-1');
+
+      expect(prisma.queueEntry.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { appointmentId: 'appt-1', status: { in: ['WAITING', 'CALLED'] } },
+        }),
+      );
+      expect(notificationsService.notify).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'APPOINTMENT_CANCELLED', to: connectUserRow.email }),
+      );
+    });
+
+    it('cancelForConnectPatient rejects cancelling an appointment owned by a different Connect user', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({ id: 'appt-1', patientId: 'other-patient' });
+      prisma.patient.findUnique.mockResolvedValue({ id: 'other-patient', userId: 'someone-else' });
+
+      await expect(
+        service.cancelForConnectPatient('appt-1', {}, 'connect-1'),
+      ).rejects.toMatchObject({
+        code: 'APPOINTMENT_NOT_FOUND',
+      });
     });
   });
 });
