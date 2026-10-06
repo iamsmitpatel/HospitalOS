@@ -5,6 +5,7 @@ import {
   DoctorSchedule,
   DoctorStatus,
   DoctorUnavailability,
+  Hospital,
   Role,
 } from '@prisma/client';
 import { AppException } from '../common/exceptions/app.exception';
@@ -442,7 +443,46 @@ export class DoctorsService {
     const hospital = await this.prisma.hospital.findUniqueOrThrow({
       where: { id: doctor.hospitalId },
     });
+    return this.computeAvailableSlots(doctor, hospital, dateStr);
+  }
 
+  /**
+   * HospitalOS Connect (Phase 5): the public, unauthenticated counterpart to
+   * getAvailableSlots above — same slot math (computeAvailableSlots), a
+   * different resolution/visibility check. There is deliberately only ONE
+   * implementation of the actual schedule/unavailability/booked-slot
+   * computation; duplicating it for the public path would risk the two
+   * silently drifting apart after a future fix to one but not the other.
+   */
+  async getPublicAvailableSlots(doctorId: string, dateStr: string): Promise<string[]> {
+    const doctor = await this.getPubliclyVisibleDoctorOrThrow(doctorId);
+    const hospital = await this.prisma.hospital.findUniqueOrThrow({
+      where: { id: doctor.hospitalId },
+    });
+    return this.computeAvailableSlots(doctor, hospital, dateStr);
+  }
+
+  /** Used by connect/discovery.service.ts — never reveals WHY a doctor isn't listed, same 404-not-403 discipline as tenant checks elsewhere. */
+  async getPubliclyVisibleDoctorOrThrow(doctorId: string): Promise<DoctorProfileWithUser> {
+    const doctor = await this.prisma.doctorProfile.findUnique({
+      where: { id: doctorId },
+      include: { user: { select: { firstName: true, lastName: true, email: true } } },
+    });
+    if (!doctor || doctor.status !== DoctorStatus.ACTIVE || !doctor.isPubliclyVisible) {
+      throw new AppException('DOCTOR_NOT_FOUND', 'Doctor not found.', HttpStatus.NOT_FOUND);
+    }
+    const hospital = await this.prisma.hospital.findUnique({ where: { id: doctor.hospitalId } });
+    if (!hospital || !hospital.isActive || !hospital.isPublic) {
+      throw new AppException('DOCTOR_NOT_FOUND', 'Doctor not found.', HttpStatus.NOT_FOUND);
+    }
+    return doctor;
+  }
+
+  private async computeAvailableSlots(
+    doctor: DoctorProfile,
+    hospital: Hospital,
+    dateStr: string,
+  ): Promise<string[]> {
     if (doctor.status !== DoctorStatus.ACTIVE) {
       return [];
     }
