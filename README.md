@@ -2,7 +2,7 @@
 
 A hospital operating platform for hospitals/clinics (HospitalOS) and a connected patient-facing platform (HospitalOS Connect). See the project's master engineering instructions (held outside this repo) for the full long-term scope.
 
-**Current status: Phase 3 — Hospital Operations Core.** Authentication, RBAC/permissions, tenant (hospital) model, users, audit/health/config infrastructure, and the operational workflow: departments, doctors (profile/schedule/availability), patients (incl. duplicate detection), appointments (state machine, conflict-safe booking/cancel/reschedule), and queue management (concurrency-safe call-next). Frontend covers the full staff-facing flow for all of the above. No clinical notes, prescriptions, laboratory, pharmacy, or billing exist yet — see `/CHANGELOG.md` and the latest Phase report for exactly what's implemented, and what's written-but-unverified due to this environment's Docker blocker.
+**Current status: Phase 4 — Clinical + Laboratory + Pharmacy + Financial Core.** Phase 3's operational workflow (departments, doctors, patients, appointments, queue) is unchanged. Phase 4 adds: clinical documentation (encounters, vitals, notes, diagnoses, prescriptions), laboratory (test catalog, orders, specimen collection, results with maker-checker verification), pharmacy (medicine catalog, FEFO batch inventory, dispensing), and billing/payments (service catalog + pricing history, invoices, payments with idempotency, refunds) — backend only, no frontend pages yet (see `/DECISIONS.md`). No HospitalOS Connect, patient self-service, or production hardening yet — see `/CHANGELOG.md` and the latest Phase report for exactly what's implemented, and what's written-but-unverified due to this environment's Docker blocker.
 
 ## Stack
 

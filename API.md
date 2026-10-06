@@ -121,6 +121,98 @@ State machine: `WAITING → CALLED → IN_CONSULTATION → COMPLETED`, with `SKI
 
 None of these grant `SUPER_ADMIN` any access (`queue.read`/`queue.operate` aren't in its permission set) — a live patient queue is operational/clinical data, same principle as Patients and Appointments.
 
+## Clinical — `/api/v1/encounters`, `/api/v1/diagnoses`, `/api/v1/prescriptions`
+
+Nested create/list routes live under `/encounters/:id/...` (matching the `/doctors/:id/schedules` convention); flat by-id mutation routes (`finalize`, `amend`) live under their own resource path (matching `/schedules/:id`).
+
+| Method & path | Permission | Notes |
+|---|---|---|
+| `POST /encounters` | `encounter.manage` (`DOCTOR` only) | `{ appointmentId? , patientId? }`. From an appointment: must already be `IN_CONSULTATION` (the queue module got it there — see `/DECISIONS.md`) and belong to the caller's own `DoctorProfile`, or `403 FORBIDDEN`/`409 APPOINTMENT_NOT_IN_CONSULTATION`. Walk-in: `patientId` required, department derived from the doctor's own. `doctorProfileId` is never taken from the body — always the caller's own profile. |
+| `GET /encounters` | `encounter.read` | Filters: `?patientId=`, `?doctorProfileId=`, `?status=`. |
+| `GET /encounters/:id` | `encounter.read` | `404 ENCOUNTER_NOT_FOUND` cross-tenant — no `SUPER_ADMIN`/`HOSPITAL_ADMIN` bypass (clinical record). |
+| `POST /encounters/:id/complete` | `encounter.manage` | Only the owning doctor, only from `IN_PROGRESS`. Best-effort syncs the linked appointment to `COMPLETED` if it's still `IN_CONSULTATION`. |
+| `POST /encounters/:id/cancel` | `encounter.manage` | Only the owning doctor, only from `IN_PROGRESS`. Does **not** touch the linked appointment (see `/DECISIONS.md`). |
+| `POST /encounters/:id/vitals` | `vitals.create` (`DOCTOR`, `NURSE`) | `{ bloodPressureSystolic?, bloodPressureDiastolic?, heartRateBpm?, temperatureCelsius?, respiratoryRate?, oxygenSaturationPercent?, weightKg?, heightCm? }` — all optional, plausible-physiological-range validated, not clinical-normal-range validated (clinical judgment stays with the clinician). `409 ENCOUNTER_CANCELLED` if the encounter was cancelled. Append-only — no update/delete endpoint. |
+| `GET /encounters/:id/vitals` | `encounter.read` | Most-recent-first. |
+| `POST /encounters/:id/notes` | `clinical_note.create` (`DOCTOR` only) | `{ chiefComplaint?, history?, examination?, assessment?, plan?, correctsId? }` — at least one section required. Append-only: `correctsId` links back to a prior note on the same encounter rather than editing it; `409 CLINICAL_NOTE_ALREADY_CORRECTED` if that note already has a newer correction. |
+| `GET /encounters/:id/notes` | `encounter.read` | Chronological. |
+| `POST /encounters/:id/diagnoses` | `diagnosis.manage` (`DOCTOR` only) | `{ description, diagnosisCode?, type? }` → `DRAFT`. `diagnosisCode` is free text the clinician already knows — never validated against or populated from a real coding system (master doc §15). |
+| `GET /encounters/:id/diagnoses` | `encounter.read` | |
+| `GET /diagnoses/:id` | `encounter.read` | |
+| `PATCH /diagnoses/:id` | `diagnosis.manage` | Only while `DRAFT` — `409 DIAGNOSIS_NOT_DRAFT` otherwise. |
+| `POST /diagnoses/:id/finalize` | `diagnosis.manage` | `DRAFT → FINALIZED`. |
+| `POST /diagnoses/:id/amend` | `diagnosis.manage` | Only a `FINALIZED` diagnosis (`409 DIAGNOSIS_NOT_FINALIZED` otherwise) — marks the original `AMENDED` and creates a new `DRAFT` row with `amendedFromId` pointing back at it. The new row needs its own `finalize` call. |
+| `POST /encounters/:id/prescriptions` | `prescription.manage` (`DOCTOR` only) | `{ notes?, items: [{ medicineId, dosage, frequency, duration, quantity, route?, instructions? }] }` → `DRAFT`. Each `medicineId` validated against the catalog (must exist, same hospital, `isActive`) — `404 MEDICINE_NOT_FOUND` / `400 MEDICINE_INACTIVE`. |
+| `GET /encounters/:id/prescriptions` | `prescription.read` (`DOCTOR`, `PHARMACIST`) | |
+| `GET /prescriptions/:id` | `prescription.read` | |
+| `PATCH /prescriptions/:id` | `prescription.manage` | Only while `DRAFT`. Supplying `items` replaces the full set. |
+| `POST /prescriptions/:id/finalize` | `prescription.manage` | `DRAFT → FINALIZED`. |
+| `POST /prescriptions/:id/amend` | `prescription.manage` | Only a `FINALIZED` prescription — same amendment-chain pattern as diagnoses, with a fresh `items` array. |
+
+## Laboratory — `/api/v1/lab-tests`, `/api/v1/lab-orders`, `/api/v1/lab-order-items`, `/api/v1/lab-results`
+
+| Method & path | Permission | Notes |
+|---|---|---|
+| `POST /lab-tests` | `labtest.manage` (catalog — `SUPER_ADMIN`, `HOSPITAL_ADMIN`) | `{ name, code, category?, sampleType?, unit?, referenceRangeLow?, referenceRangeHigh? }`. `code` unique per hospital. |
+| `GET /lab-tests` | `labtest.read` (+ `DOCTOR`, `LAB_TECHNICIAN`) | `?isActive=true\|false`. |
+| `GET /lab-tests/:id` / `PATCH /lab-tests/:id` | `labtest.read` / `labtest.manage` | |
+| `POST /encounters/:id/lab-orders` | `lab_order.create` (`DOCTOR` only) | `{ items: [{ labTestId }] }`. Only the encounter's own doctor; each `labTestId` must be active. |
+| `GET /encounters/:id/lab-orders` | `lab_order.read` (`DOCTOR`, `LAB_TECHNICIAN`) | |
+| `GET /lab-orders/:id` | `lab_order.read` | Returns the order's items, each with its `result` nested if one exists. |
+| `POST /lab-orders/:id/cancel` | `lab_order.create` | Only the ordering doctor; `409 LAB_ORDER_NOT_CANCELLABLE` if already `COMPLETED`/`CANCELLED`. Cancels every non-completed item too. |
+| `POST /lab-order-items/:id/collect` | `lab_order.process` (`LAB_TECHNICIAN` only) | `{ specimenType? }`. Only from `ORDERED`. Rolls the parent order's status up (`ORDERED → COLLECTED → PROCESSING → COMPLETED`, see `/DATABASE.md`). |
+| `POST /lab-order-items/:id/result` | `lab_result.enter` (`LAB_TECHNICIAN` only) | `{ value, unit?, referenceRange?, flag? }`. Only from `COLLECTED`; `409 LAB_RESULT_ALREADY_ENTERED` if one exists already. |
+| `GET /lab-results/:id` | `lab_result.read` (`DOCTOR`, `LAB_TECHNICIAN`) | |
+| `PATCH /lab-results/:id` | `lab_result.enter` | Only while `ENTERED` (pre-verification correction). `409 LAB_RESULT_NOT_EDITABLE` once `VERIFIED`. |
+| `POST /lab-results/:id/verify` | `lab_result.verify` (`LAB_TECHNICIAN` only) | **Maker-checker**: `403 SELF_VERIFICATION_FORBIDDEN` if the caller is the same user who entered the result (master doc §32). `ENTERED → VERIFIED`. |
+| `POST /lab-results/:id/amend` | `lab_result.enter` | Only a `VERIFIED` result. Because `LabResult.labOrderItemId` is unique (one result per item, ever — see `/DATABASE.md`), amending creates a **new** `LabOrderItem` (same order, same test) carrying the corrected value, linked back via `amendsId` — not a new result on the same item. |
+
+## Pharmacy — `/api/v1/medicines`, `/api/v1/stock-batches`, `/api/v1/dispense-records`
+
+| Method & path | Permission | Notes |
+|---|---|---|
+| `POST /medicines` | `medicine.manage` (catalog) | `{ name, genericName?, brandName?, strength?, form?, unit? }`. |
+| `GET /medicines` | `medicine.read` (+ `DOCTOR`, `PHARMACIST`) | `?isActive=`. |
+| `GET /medicines/:id` / `PATCH /medicines/:id` | `medicine.read` / `medicine.manage` | |
+| `POST /medicines/:id/stock-batches` | `inventory.manage` (`HOSPITAL_ADMIN`, `PHARMACIST` — **not** `SUPER_ADMIN`, inventory is hospital-operational, not platform-catalog) | `{ batchNumber, quantityReceived, expiryDate, purchasePrice? }`. `409 BATCH_NUMBER_TAKEN` per medicine+hospital. Logs a `PURCHASE` stock movement. |
+| `GET /medicines/:id/stock-batches` | `inventory.read` | Ordered by expiry (FEFO order). |
+| `GET /medicines/:id/stock-movements` | `inventory.read` | Full audit trail of every quantity change for that medicine, most-recent-first. |
+| `GET /stock-batches/:id` | `inventory.read` | |
+| `POST /stock-batches/:id/adjust` | `inventory.manage` | `{ delta, notes? }` (signed; cannot be 0). `400 INSUFFICIENT_STOCK` if a negative delta would drive the batch below zero — atomic, not just pre-checked (see `/DATABASE.md`). Flips `ACTIVE ↔ DEPLETED` automatically; never touches an `EXPIRED` batch's status. |
+| `POST /stock-batches/:id/mark-expired` | `inventory.manage` | Only from `ACTIVE`. Zeroes `quantityRemaining`, logs an `EXPIRED` movement. |
+| `POST /dispense-records` | `pharmacy.dispense` (`PHARMACIST` only) | `{ prescriptionItemId, quantity }`. Prescription must be `FINALIZED`; `quantity` may be a partial fill (`400 EXCEEDS_PRESCRIBED_QUANTITY` if it exceeds what's left undispensed). **FEFO**: draws from the earliest-expiring active, unexpired batch first, spanning multiple batches in one request if needed — returns an **array** of dispense records, one per batch consumed. `409 INSUFFICIENT_STOCK` if the hospital doesn't have enough active stock to fulfil the full requested quantity (the whole request rolls back — no partial dispense). |
+| `GET /dispense-records?prescriptionItemId=` | `pharmacy.dispense` | |
+| `GET /dispense-records/:id` | `pharmacy.dispense` | |
+| `POST /dispense-records/:id/return` | `pharmacy.dispense` | `{ quantity, notes? }`. Credits the quantity back to the batch it was originally dispensed from. Checked only against that single dispense's own `quantity` — does not track cumulative prior returns against it (see `/DECISIONS.md`). |
+
+## Billing — `/api/v1/services`, `/api/v1/invoices`
+
+| Method & path | Permission | Notes |
+|---|---|---|
+| `POST /services` | `service.manage` (catalog) | `{ name, code, category? }` (`ServiceCategory`: `CONSULTATION\|LABORATORY\|PROCEDURE\|IMAGING\|PHARMACY\|OTHER`). |
+| `GET /services` | `service.read` | `?isActive=`. Each result includes `currentPrice` (the row with `effectiveTo: null`, or `null` if never priced). |
+| `GET /services/:id` / `PATCH /services/:id` | `service.read` / `service.manage` | |
+| `POST /services/:id/prices` | `service.manage` | `{ amount, currency? }`. Closes out the existing current price (`effectiveTo: now()`) and opens a new one, in the same transaction — never mutates a price row in place. |
+| `GET /services/:id/prices` | `service.read` | Full price history, most recent first. |
+| `POST /invoices` | `invoice.manage` (`HOSPITAL_ADMIN`, `RECEPTIONIST`, `ACCOUNTANT`) | `{ patientId, encounterId?, items: [{ serviceId? , description?, unitPrice?, quantity?, discountAmount? }], discountAmount?, taxRate? }` → `DRAFT`. An item with `serviceId` snapshots the catalog's *current* price and the service's name (unless `description` is overridden) at creation time — never re-derived later. An item without `serviceId` requires its own `description`+`unitPrice` (a free-form charge). `400 DISCOUNT_EXCEEDS_SUBTOTAL` / `400 ITEM_DISCOUNT_EXCEEDS_LINE_TOTAL` guard the non-negative-total invariant proactively, backed by a DB CHECK constraint. |
+| `GET /invoices` | `invoice.read` | `?patientId=`, `?status=`. |
+| `GET /invoices/:id` | `invoice.read` | |
+| `POST /invoices/:id/issue` | `invoice.manage` | `DRAFT → ISSUED`. |
+| `POST /invoices/:id/cancel` | `invoice.manage` | Only `DRAFT`/`ISSUED` **and** `amountPaid` still zero (`409 INVOICE_HAS_PAYMENTS` otherwise) — a paid invoice is never silently cancelled. |
+
+## Payments — `/api/v1/payments`, `/api/v1/refunds`
+
+| Method & path | Permission | Notes |
+|---|---|---|
+| `POST /payments` | `payment.manage` (`HOSPITAL_ADMIN`, `RECEPTIONIST`, `ACCOUNTANT`) | `{ invoiceId, amount, method, referenceNumber?, idempotencyKey? }` (`PaymentMethod`: `CASH\|CARD\|UPI\|BANK_TRANSFER\|OTHER`). `referenceNumber` is an external/terminal transaction reference only — **never** a card number or CVV (neither is ever stored anywhere in this schema). With `idempotencyKey`: a retried request with the same key returns the **original** payment instead of creating a second one — proven under real concurrency, not just a documentation claim (see `/TESTING.md`). `409 INVOICE_NOT_PAYABLE` for a `DRAFT`/`CANCELLED` invoice; `400 PAYMENT_EXCEEDS_BALANCE` if it would overpay. Moves the invoice to `PARTIALLY_PAID` or `PAID`. |
+| `GET /payments?invoiceId=` | `payment.read` | |
+| `GET /payments/:id` | `payment.read` | |
+| `POST /refunds` | `payment.refund` (`HOSPITAL_ADMIN`, `ACCOUNTANT` — **not** `RECEPTIONIST`, refunds are more sensitive than taking a payment) | `{ invoiceId, paymentId?, amount, reason? }`. `400 REFUND_EXCEEDS_PAID` if it would refund more than has actually been paid. Moves the invoice to `PARTIALLY_PAID` or `REFUNDED`. |
+| `GET /refunds?invoiceId=` | `payment.read` | |
+| `GET /refunds/:id` | `payment.read` | |
+
+None of the Phase 4 modules grant `SUPER_ADMIN` any patient-touching clinical permission (`ENCOUNTER_*`/`VITALS_*`/`CLINICAL_NOTE_*`/`DIAGNOSIS_*`/`PRESCRIPTION_*`/`LAB_ORDER_*`/`LAB_RESULT_*`) — same principle as Patients/Appointments/Queue in Phase 3. `HOSPITAL_ADMIN` gets full catalog and financial administration (`medicine.*`, `labtest.*`, `service.*`, `invoice.*`, `payment.*`, `inventory.*`) but is **equally excluded** from every clinical-record permission — an administrator is not a clinical role merely by administering the hospital. See `/SECURITY.md`.
+
 ## Health — `/api/v1/health`
 
 | Method & path | Auth | Notes |
@@ -133,4 +225,4 @@ Every response carries an `x-correlation-id` header — echoed from the request 
 
 ## Not yet implemented
 
-Clinical notes, prescriptions, laboratory, radiology, pharmacy, billing, payments, insurance, AI, analytics, HospitalOS Connect public discovery, and patient-role self-service — all later-phase scope per the master roadmap (§3).
+Radiology, insurance, AI, analytics, HospitalOS Connect public discovery, and patient-role self-service — all later-phase scope per the master roadmap (§3). (Clinical notes, prescriptions, laboratory, pharmacy, and billing/payments were added in Phase 4 — see above.)

@@ -1,6 +1,6 @@
 # Deployment
 
-**Status as of Phase 3: local development only.** Nothing in this repository has been deployed anywhere, and no CI/CD pipeline exists yet (that's Phase 7 — production hardening, per master doc §27). This document covers running the platform locally.
+**Status as of Phase 4: local development only.** Nothing in this repository has been deployed anywhere, and no CI/CD pipeline exists yet (that's Phase 7 — production hardening, per master doc §27). This document covers running the platform locally. Phase 4 introduced no new environment variables or infrastructure dependencies — same Postgres + Redis as Phase 1-3.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ Port 3001 matches the API's default `CORS_ORIGIN` (`apps/api/.env.example`) out 
 
 ## A note on this environment
 
-Every verification step in this repo's history that needs Docker — generating/applying a Prisma migration against a real database, running the e2e test suite, running the API itself (it calls Postgres on boot) — is **blocked** here: `docker ps` fails with "Docker Desktop is unable to start," and the underlying `com.docker.service` Windows service cannot be started directly either (confirmed independently in Phase 1, Phase 2, and Phase 3). If you're reading this in an environment where Docker actually works, none of this applies to you — just follow "First-time setup" above. If you hit the same blocker, see `/DATABASE.md` for how both migrations were generated without a live database connection (`prisma migrate diff`), and `/TESTING.md` for exactly what has and hasn't been executed as a result.
+Every verification step in this repo's history that needs Docker — generating/applying a Prisma migration against a real database, running the e2e test suite, running the API itself (it calls Postgres on boot) — is **blocked** here: `docker ps` fails with "Docker Desktop is unable to start," and the underlying `com.docker.service` Windows service cannot be started directly either (confirmed independently in Phase 1, Phase 2, Phase 3, and again in Phase 4 — `docker info`/`docker ps` re-checked at the start of Phase 4's e2e-test task, same failure). If you're reading this in an environment where Docker actually works, none of this applies to you — just follow "First-time setup" above. If you hit the same blocker, see `/DATABASE.md` for how both migrations were generated without a live database connection (`prisma migrate diff`), and `/TESTING.md` for exactly what has and hasn't been executed as a result.
 
 ## Environment variables
 
