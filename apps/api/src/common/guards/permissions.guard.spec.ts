@@ -66,12 +66,103 @@ describe('permissions foundation', () => {
       expect(roleHasPermission(Role.RECEPTIONIST, Permission.DOCTOR_SCHEDULE_MANAGE)).toBe(false);
     });
 
-    it('grants PHARMACIST/LAB_TECHNICIAN/ACCOUNTANT read-only access, no write/operational permissions', () => {
+    it('grants PHARMACIST/LAB_TECHNICIAN/ACCOUNTANT patient read access but no front-desk registration/appointment/queue permissions (their operational writes are scoped to their own domain instead — see Phase 4 assertions below)', () => {
       for (const role of [Role.PHARMACIST, Role.LAB_TECHNICIAN, Role.ACCOUNTANT]) {
         expect(roleHasPermission(role, Permission.PATIENT_READ)).toBe(true);
         expect(roleHasPermission(role, Permission.PATIENT_CREATE)).toBe(false);
         expect(roleHasPermission(role, Permission.APPOINTMENT_CREATE)).toBe(false);
         expect(roleHasPermission(role, Permission.QUEUE_OPERATE)).toBe(false);
+      }
+    });
+
+    it('Phase 4: grants only DOCTOR clinical documentation authorship (encounter, notes, diagnosis, prescription) — not NURSE or RECEPTIONIST', () => {
+      expect(roleHasPermission(Role.DOCTOR, Permission.ENCOUNTER_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.DOCTOR, Permission.CLINICAL_NOTE_CREATE)).toBe(true);
+      expect(roleHasPermission(Role.DOCTOR, Permission.DIAGNOSIS_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.DOCTOR, Permission.PRESCRIPTION_MANAGE)).toBe(true);
+
+      for (const role of [Role.NURSE, Role.RECEPTIONIST]) {
+        expect(roleHasPermission(role, Permission.ENCOUNTER_MANAGE)).toBe(false);
+        expect(roleHasPermission(role, Permission.CLINICAL_NOTE_CREATE)).toBe(false);
+        expect(roleHasPermission(role, Permission.DIAGNOSIS_MANAGE)).toBe(false);
+        expect(roleHasPermission(role, Permission.PRESCRIPTION_MANAGE)).toBe(false);
+      }
+    });
+
+    it('Phase 4: grants NURSE vitals but nothing beyond (master doc §52 — "Nurse: vital signs where permitted")', () => {
+      expect(roleHasPermission(Role.NURSE, Permission.VITALS_CREATE)).toBe(true);
+      expect(roleHasPermission(Role.NURSE, Permission.CLINICAL_NOTE_CREATE)).toBe(false);
+      expect(roleHasPermission(Role.RECEPTIONIST, Permission.VITALS_CREATE)).toBe(false);
+    });
+
+    it('Phase 4: grants RECEPTIONIST front-desk billing (invoice/payment) but never refunds', () => {
+      expect(roleHasPermission(Role.RECEPTIONIST, Permission.INVOICE_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.RECEPTIONIST, Permission.PAYMENT_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.RECEPTIONIST, Permission.PAYMENT_REFUND)).toBe(false);
+    });
+
+    it('Phase 4: DOCTOR never gets financial administration (master doc §51)', () => {
+      expect(roleHasPermission(Role.DOCTOR, Permission.INVOICE_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.DOCTOR, Permission.PAYMENT_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.DOCTOR, Permission.PAYMENT_REFUND)).toBe(false);
+    });
+
+    it('Phase 4: grants PHARMACIST dispensing and inventory, nothing clinical or financial', () => {
+      expect(roleHasPermission(Role.PHARMACIST, Permission.PHARMACY_DISPENSE)).toBe(true);
+      expect(roleHasPermission(Role.PHARMACIST, Permission.INVENTORY_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.PHARMACIST, Permission.DIAGNOSIS_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.PHARMACIST, Permission.INVOICE_MANAGE)).toBe(false);
+    });
+
+    it('Phase 4: grants LAB_TECHNICIAN the lab workflow, nothing clinical-authorship or financial ("Accountant should not modify clinical notes" implies the inverse too, §55)', () => {
+      expect(roleHasPermission(Role.LAB_TECHNICIAN, Permission.LAB_RESULT_ENTER)).toBe(true);
+      expect(roleHasPermission(Role.LAB_TECHNICIAN, Permission.LAB_RESULT_VERIFY)).toBe(true);
+      expect(roleHasPermission(Role.LAB_TECHNICIAN, Permission.DIAGNOSIS_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.LAB_TECHNICIAN, Permission.INVOICE_MANAGE)).toBe(false);
+    });
+
+    it('Phase 4: ACCOUNTANT never touches clinical records (master doc §55)', () => {
+      expect(roleHasPermission(Role.ACCOUNTANT, Permission.PAYMENT_REFUND)).toBe(true);
+      expect(roleHasPermission(Role.ACCOUNTANT, Permission.DIAGNOSIS_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.ACCOUNTANT, Permission.CLINICAL_NOTE_CREATE)).toBe(false);
+      expect(roleHasPermission(Role.ACCOUNTANT, Permission.PHARMACY_DISPENSE)).toBe(false);
+    });
+
+    it('Phase 4: HOSPITAL_ADMIN gets catalog/financial administration but no clinical-record access at all — same principle as SUPER_ADMIN, applied one level down', () => {
+      expect(roleHasPermission(Role.HOSPITAL_ADMIN, Permission.MEDICINE_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.HOSPITAL_ADMIN, Permission.INVOICE_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.HOSPITAL_ADMIN, Permission.PAYMENT_REFUND)).toBe(true);
+      for (const permission of [
+        Permission.ENCOUNTER_READ,
+        Permission.ENCOUNTER_MANAGE,
+        Permission.VITALS_CREATE,
+        Permission.CLINICAL_NOTE_CREATE,
+        Permission.DIAGNOSIS_MANAGE,
+        Permission.PRESCRIPTION_MANAGE,
+        Permission.PRESCRIPTION_READ,
+        Permission.LAB_ORDER_CREATE,
+        Permission.LAB_RESULT_ENTER,
+        Permission.LAB_RESULT_READ,
+      ]) {
+        expect(roleHasPermission(Role.HOSPITAL_ADMIN, permission)).toBe(false);
+      }
+    });
+
+    it('Phase 4: SUPER_ADMIN gets catalog permissions (medicine/labtest/service) but nothing patient-touching', () => {
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.MEDICINE_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.LABTEST_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.SERVICE_MANAGE)).toBe(true);
+      for (const permission of [
+        Permission.ENCOUNTER_MANAGE,
+        Permission.DIAGNOSIS_MANAGE,
+        Permission.PRESCRIPTION_MANAGE,
+        Permission.LAB_RESULT_ENTER,
+        Permission.PHARMACY_DISPENSE,
+        Permission.INVOICE_MANAGE,
+        Permission.PAYMENT_MANAGE,
+        Permission.PAYMENT_REFUND,
+      ]) {
+        expect(roleHasPermission(Role.SUPER_ADMIN, permission)).toBe(false);
       }
     });
 
