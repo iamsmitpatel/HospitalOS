@@ -247,6 +247,25 @@ export class DoctorsService {
     return doctor;
   }
 
+  /**
+   * Used by clinical.* services (Phase 4) to resolve "my own DoctorProfile"
+   * so an encounter/diagnosis/prescription is always authored as the actor
+   * themselves, never a doctorProfileId trusted from the request body — same
+   * "own resource" ownership rule as assertCanManageSchedule below, applied
+   * one layer earlier (at resolution time instead of after the fact).
+   */
+  async getOwnDoctorProfileOrThrow(actor: AuthenticatedUser): Promise<DoctorProfile> {
+    const doctor = await this.prisma.doctorProfile.findUnique({ where: { userId: actor.userId } });
+    if (!doctor || doctor.hospitalId !== actor.hospitalId) {
+      throw new AppException(
+        'DOCTOR_PROFILE_NOT_FOUND',
+        'No doctor profile is associated with this account.',
+        HttpStatus.FORBIDDEN,
+      );
+    }
+    return doctor;
+  }
+
   // ---------------------------------------------------------------------
   // Schedules
   // ---------------------------------------------------------------------
