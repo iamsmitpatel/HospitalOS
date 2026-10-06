@@ -28,6 +28,8 @@ export const Permission = {
   HOSPITAL_CREATE: 'hospital.create',
   HOSPITAL_UPDATE: 'hospital.update',
   HOSPITAL_LIST: 'hospital.list',
+  /** Deliberately narrower than HOSPITAL_UPDATE (SUPER_ADMIN-only) — lets a HOSPITAL_ADMIN manage their own public-discovery listing without platform-level rename/deactivate power (Phase 5). */
+  HOSPITAL_PUBLIC_PROFILE_MANAGE: 'hospital.public_profile.manage',
   USER_READ: 'user.read',
   USER_CREATE: 'user.create',
   USER_UPDATE: 'user.update',
@@ -98,6 +100,19 @@ export const Permission = {
   PAYMENT_MANAGE: 'payment.manage',
   /** Deliberately separate and narrower than PAYMENT_MANAGE — refunds are more sensitive (§49). */
   PAYMENT_REFUND: 'payment.refund',
+
+  // --- Phase 5: HospitalOS Connect (patient portal) -----------------------
+  /**
+   * One permission covers every Connect business action (profile, booking,
+   * queue tracking, medical-record reads) — the same "don't model hundreds
+   * of permissions prematurely" judgment as QUEUE_OPERATE, applied here
+   * because exactly one role (PATIENT) will ever hold any of them. The real
+   * authorization is per-resource ownership (actor.userId === the linked
+   * Patient.userId), enforced in each Connect service — this permission
+   * only gates "is this caller a patient at all," not which records they
+   * may touch. See connect/ and /SECURITY.md.
+   */
+  PATIENT_PORTAL_ACCESS: 'patient_portal.access',
 } as const;
 
 export type PermissionType = (typeof Permission)[keyof typeof Permission];
@@ -126,6 +141,7 @@ const PLATFORM_ADMIN_PERMISSIONS: PermissionType[] = [
   Permission.MEDICINE_MANAGE,
   Permission.SERVICE_READ,
   Permission.SERVICE_MANAGE,
+  Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE,
 ];
 
 /** Baseline front-desk workflow shared by NURSE/RECEPTIONIST/DOCTOR: patient registration, appointments, queue. No clinical documentation. */
@@ -174,7 +190,11 @@ const HOSPITAL_ADMIN_PERMISSIONS: PermissionType[] = [
   Permission.PAYMENT_MANAGE,
   Permission.PAYMENT_READ,
   Permission.PAYMENT_REFUND,
+  Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE,
 ];
+
+/** HospitalOS Connect (Phase 5) — see Permission.PATIENT_PORTAL_ACCESS above for why this is one permission, not several. */
+const PATIENT_PERMISSIONS: PermissionType[] = [Permission.PATIENT_PORTAL_ACCESS];
 
 const DOCTOR_PERMISSIONS: PermissionType[] = [
   ...CLINICAL_OPERATIONAL_PERMISSIONS,
@@ -245,10 +265,12 @@ const ACCOUNTANT_PERMISSIONS: PermissionType[] = [
 
 /**
  * Every role's permission set is listed explicitly — none are inherited
- * implicitly from another role. Role.PATIENT (a login role, reserved for
- * Phase 5 patient self-service / HospitalOS Connect — not to be confused
- * with the Patient clinical entity) gets zero permissions here; this phase
- * builds no patient-facing operational endpoints (§3, §34/§55 deferred).
+ * implicitly from another role. Role.PATIENT (the HospitalOS Connect
+ * self-service login role — not to be confused with the Patient clinical
+ * entity) now carries PATIENT_PORTAL_ACCESS as of Phase 5; it still holds
+ * none of the staff clinical/financial/catalog permissions above, by the
+ * same platform-vs-clinical-vs-patient separation principle applied to
+ * every other role split in this file.
  */
 export const ROLE_PERMISSIONS: Record<Role, PermissionType[]> = {
   [Role.SUPER_ADMIN]: PLATFORM_ADMIN_PERMISSIONS,
@@ -259,7 +281,7 @@ export const ROLE_PERMISSIONS: Record<Role, PermissionType[]> = {
   [Role.PHARMACIST]: PHARMACIST_PERMISSIONS,
   [Role.LAB_TECHNICIAN]: LAB_TECHNICIAN_PERMISSIONS,
   [Role.ACCOUNTANT]: ACCOUNTANT_PERMISSIONS,
-  [Role.PATIENT]: [],
+  [Role.PATIENT]: PATIENT_PERMISSIONS,
 };
 
 export function roleHasPermission(role: Role, permission: PermissionType): boolean {

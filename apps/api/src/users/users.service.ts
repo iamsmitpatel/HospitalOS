@@ -27,6 +27,21 @@ export class UsersService {
     actor: AuthenticatedUser,
     correlationId?: string,
   ): Promise<UserResponseDto> {
+    // Role.PATIENT accounts are never provisioned by staff (Phase 5, master
+    // doc Part 1): they self-register through POST /auth/register-patient,
+    // which is the only path that correctly sets hospitalId: null for a
+    // patient (patients are not scoped to one hospital — see
+    // AuthService#registerPatient). Blocking it here, not just omitting it
+    // from documentation, closes a real gap this endpoint had no reason to
+    // ever reach — see /DECISIONS.md.
+    if (dto.role === Role.PATIENT) {
+      throw new AppException(
+        'PATIENT_SELF_REGISTRATION_ONLY',
+        'Patient accounts cannot be created by staff. Patients register themselves via POST /auth/register-patient.',
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
     const targetHospitalId = await this.resolveTargetHospitalId(dto, actor);
 
     const existing = await this.prisma.user.findUnique({

@@ -80,6 +80,72 @@ describe('AuthService', () => {
     });
   });
 
+  describe('registerPatient', () => {
+    const validDto = {
+      email: 'Patient@Example.com',
+      password: 'Str0ngPass!',
+      firstName: 'Asha',
+      lastName: 'Verma',
+      phone: '+91 90000 00001',
+      dateOfBirth: '1992-05-10',
+      gender: 'FEMALE' as const,
+    };
+
+    it('creates a Role.PATIENT account with hospitalId: null, unlike register() never closing', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.create.mockImplementation(({ data }: any) => ({ id: 'patient-user-1', ...data }));
+
+      const { user } = await service.registerPatient(validDto, {});
+
+      expect(user.role).toBe(Role.PATIENT);
+      expect(user.hospitalId).toBeNull();
+      expect(prisma.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            email: 'patient@example.com',
+            role: Role.PATIENT,
+            hospitalId: null,
+            phone: validDto.phone,
+          }),
+        }),
+      );
+      expect(auditService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'PATIENT_PORTAL_REGISTERED' }),
+      );
+    });
+
+    it('rejects an email already in use, regardless of how many users already exist', async () => {
+      prisma.user.findUnique.mockResolvedValue({ id: 'existing' });
+
+      await expect(service.registerPatient(validDto, {})).rejects.toMatchObject({
+        code: 'EMAIL_ALREADY_IN_USE',
+      });
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a date of birth in the future', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.registerPatient({ ...validDto, dateOfBirth: '2099-01-01' }, {}),
+      ).rejects.toMatchObject({ code: 'INVALID_DATE_OF_BIRTH' });
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('never closes the way register() does, even with many existing users', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.user.create.mockImplementation(({ data }: any) => ({ id: 'patient-user-2', ...data }));
+      // registerPatient never calls prisma.user.count — confirm it isn't gated by it at all.
+      prisma.user.count = jest.fn().mockResolvedValue(9999);
+
+      const { user } = await service.registerPatient(
+        { ...validDto, email: 'another@example.com' },
+        {},
+      );
+      expect(user.role).toBe(Role.PATIENT);
+    });
+  });
+
   describe('login', () => {
     it('rejects an unknown email with a generic error and logs the failure', async () => {
       prisma.user.findUnique.mockResolvedValue(null);

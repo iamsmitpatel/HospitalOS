@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.constants';
 import { RegisterDto } from './dto/register.dto';
+import { RegisterPatientDto } from './dto/register-patient.dto';
 import { LoginDto } from './dto/login.dto';
 
 export interface IssuedTokenPair {
@@ -97,6 +98,77 @@ export class AuthService {
 
     await this.auditService.log({
       action: AuditAction.USER_REGISTERED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: user.id,
+      ipAddress: ctx.ipAddress,
+      correlationId: ctx.correlationId,
+      resourceType: 'User',
+      resourceId: user.id,
+    });
+
+    const tokens = await this.issueTokenPair(
+      user.id,
+      user.email,
+      user.role,
+      user.hospitalId,
+      ctx.ipAddress,
+    );
+    return { user: this.toProfile(user), tokens };
+  }
+
+  /**
+   * HospitalOS Connect self-registration (Phase 5) — unlike register()
+   * above, this is never closed: any number of patients may create an
+   * account at any time. Always Role.PATIENT, always hospitalId: null
+   * (patients are not scoped to one hospital — they may book across
+   * several). Reuses the exact same password hashing / token issuance /
+   * audit-logging primitives as every other identity in this system; the
+   * only new piece is which role and which (absent) tenant get assigned.
+   */
+  async registerPatient(
+    dto: RegisterPatientDto,
+    ctx: RequestContext,
+  ): Promise<{ user: AuthenticatedUserProfile; tokens: IssuedTokenPair }> {
+    const email = dto.email.toLowerCase();
+    const existing = await this.prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      throw new AppException(
+        'EMAIL_ALREADY_IN_USE',
+        'An account with this email already exists.',
+        HttpStatus.CONFLICT,
+      );
+    }
+
+    const dateOfBirth = new Date(dto.dateOfBirth);
+    if (dateOfBirth.getTime() > Date.now()) {
+      throw new AppException(
+        'INVALID_DATE_OF_BIRTH',
+        'Date of birth cannot be in the future.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(
+      dto.password,
+      this.configService.get('bcryptSaltRounds', { infer: true }),
+    );
+
+    const user = await this.prisma.user.create({
+      data: {
+        email,
+        passwordHash,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        role: Role.PATIENT,
+        hospitalId: null,
+        phone: dto.phone,
+        dateOfBirth,
+        gender: dto.gender,
+      },
+    });
+
+    await this.auditService.log({
+      action: AuditAction.PATIENT_PORTAL_REGISTERED,
       outcome: AuditOutcome.SUCCESS,
       actorUserId: user.id,
       ipAddress: ctx.ipAddress,

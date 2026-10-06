@@ -96,6 +96,37 @@ describe('UsersService', () => {
       ).rejects.toMatchObject({ code: 'HOSPITAL_NOT_FOUND' });
     });
 
+    it('rejects role: PATIENT outright — patients self-register via POST /auth/register-patient, never via staff (Phase 5)', async () => {
+      await expect(
+        service.create(
+          {
+            email: 'patient@example.com',
+            password: 'Str0ngPass1',
+            firstName: 'X',
+            lastName: 'Y',
+            role: Role.PATIENT,
+          },
+          hospitalAdminA,
+        ),
+      ).rejects.toMatchObject({ code: 'PATIENT_SELF_REGISTRATION_ONLY' });
+      expect(prisma.user.create).not.toHaveBeenCalled();
+
+      // Not even a SUPER_ADMIN may do this.
+      await expect(
+        service.create(
+          {
+            email: 'patient2@example.com',
+            password: 'Str0ngPass1',
+            firstName: 'X',
+            lastName: 'Y',
+            role: Role.PATIENT,
+            hospitalId: 'hospital-a',
+          },
+          superAdmin,
+        ),
+      ).rejects.toMatchObject({ code: 'PATIENT_SELF_REGISTRATION_ONLY' });
+    });
+
     it('rejects a duplicate email with a 409-style conflict', async () => {
       prisma.user.findUnique.mockResolvedValue({ id: 'existing' });
 

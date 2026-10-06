@@ -48,8 +48,8 @@ describe('permissions foundation', () => {
       }
     });
 
-    it('grants Role.PATIENT zero permissions (Phase 3 builds no patient self-service endpoints)', () => {
-      expect(ROLE_PERMISSIONS[Role.PATIENT]).toEqual([]);
+    it('grants Role.PATIENT exactly the Connect portal permission, nothing from the staff model (Phase 3: zero; Phase 5: patient_portal.access only)', () => {
+      expect(ROLE_PERMISSIONS[Role.PATIENT]).toEqual([Permission.PATIENT_PORTAL_ACCESS]);
     });
 
     it('grants DOCTOR/NURSE/RECEPTIONIST the full clinical operational workflow (patient, appointment, queue)', () => {
@@ -221,6 +221,44 @@ describe('permissions foundation', () => {
         .mockReturnValue([Permission.USER_CREATE, Permission.HOSPITAL_CREATE]);
       expect(guard.canActivate(makeContext({ role: Role.HOSPITAL_ADMIN }))).toBe(false);
       expect(guard.canActivate(makeContext({ role: Role.SUPER_ADMIN }))).toBe(true);
+    });
+  });
+
+  describe('Phase 5: HospitalOS Connect', () => {
+    it('grants only PATIENT the patient-portal permission', () => {
+      expect(roleHasPermission(Role.PATIENT, Permission.PATIENT_PORTAL_ACCESS)).toBe(true);
+      for (const role of [
+        Role.SUPER_ADMIN,
+        Role.HOSPITAL_ADMIN,
+        Role.DOCTOR,
+        Role.NURSE,
+        Role.RECEPTIONIST,
+        Role.PHARMACIST,
+        Role.LAB_TECHNICIAN,
+        Role.ACCOUNTANT,
+      ]) {
+        expect(roleHasPermission(role, Permission.PATIENT_PORTAL_ACCESS)).toBe(false);
+      }
+    });
+
+    it('PATIENT holds no staff permission of any kind', () => {
+      expect(roleHasPermission(Role.PATIENT, Permission.PATIENT_READ)).toBe(false);
+      expect(roleHasPermission(Role.PATIENT, Permission.APPOINTMENT_READ)).toBe(false);
+      expect(roleHasPermission(Role.PATIENT, Permission.ENCOUNTER_READ)).toBe(false);
+      expect(roleHasPermission(Role.PATIENT, Permission.INVOICE_READ)).toBe(false);
+    });
+
+    it('grants HOSPITAL_PUBLIC_PROFILE_MANAGE to HOSPITAL_ADMIN and SUPER_ADMIN only', () => {
+      expect(
+        roleHasPermission(Role.HOSPITAL_ADMIN, Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE),
+      ).toBe(true);
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE)).toBe(
+        true,
+      );
+      expect(roleHasPermission(Role.DOCTOR, Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.PATIENT, Permission.HOSPITAL_PUBLIC_PROFILE_MANAGE)).toBe(
+        false,
+      );
     });
   });
 });
