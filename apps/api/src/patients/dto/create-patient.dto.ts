@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Gender } from '@prisma/client';
 import {
+  IsBoolean,
   IsDateString,
   IsEmail,
   IsEnum,
@@ -66,4 +67,14 @@ export class CreatePatientDto {
     message: 'emergencyContactPhone must be 7-20 characters of digits, spaces, +, -, ()',
   })
   emergencyContactPhone?: string;
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Set true to register anyway after being warned of a likely-duplicate match (same phone + date of birth already on file). Does not bypass any other validation. See /DECISIONS.md — master doc §22 explicitly forbids auto-merging on probabilistic matches, so this is a human confirmation, not an override of a hard rule.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  confirmDuplicate?: boolean;
 }

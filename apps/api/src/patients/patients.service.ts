@@ -37,6 +37,24 @@ export class PatientsService {
 
     const dateOfBirth = this.parseAndValidateDateOfBirth(dto.dateOfBirth);
 
+    // Duplicate-registration prevention (master doc §22): names are never
+    // used as a matching indicator (not unique), and a match never
+    // auto-merges or auto-blocks — it surfaces as a confirmable warning.
+    // phone + dateOfBirth together is a reasonable, configurable indicator;
+    // not a definitive identity match.
+    if (!dto.confirmDuplicate) {
+      const possibleDuplicate = await this.prisma.patient.findFirst({
+        where: { hospitalId: actor.hospitalId, isActive: true, phone: dto.phone, dateOfBirth },
+      });
+      if (possibleDuplicate) {
+        throw new AppException(
+          'POTENTIAL_DUPLICATE_PATIENT',
+          `A patient with this phone number and date of birth is already registered (MRN: ${possibleDuplicate.mrn}). Set confirmDuplicate: true to register anyway.`,
+          HttpStatus.CONFLICT,
+        );
+      }
+    }
+
     const patient = await this.prisma.$transaction(async (tx) => {
       // Atomic per-hospital counter: a single UPDATE ... increment is
       // row-locked by Postgres, so concurrent registrations for the same
@@ -203,10 +221,8 @@ export class PatientsService {
     return date;
   }
 
-  private async getTenantScopedPatientOrThrow(
-    id: string,
-    actor: AuthenticatedUser,
-  ): Promise<Patient> {
+  /** Public so appointments.service.ts / queue.service.ts can validate a patient reference without duplicating this check. */
+  async getTenantScopedPatientOrThrow(id: string, actor: AuthenticatedUser): Promise<Patient> {
     const patient = await this.prisma.patient.findUnique({ where: { id } });
     // 404 (not 403) for cross-tenant access, same reasoning as users/hospitals
     // (§9, §30): never confirm a patient exists in a tenant the caller can't see.

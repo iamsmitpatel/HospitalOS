@@ -10,8 +10,8 @@ import {
   Req,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Role } from '@prisma/client';
-import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
+import { Permission } from '../common/constants/permissions.constants';
 import { CurrentUser, AuthenticatedUser } from '../common/decorators/current-user.decorator';
 import { ResponseMessage } from '../common/interceptors/response.interceptor';
 import { RequestWithCorrelationId } from '../common/middleware/correlation-id.middleware';
@@ -20,16 +20,13 @@ import { UpdatePatientDto } from './dto/update-patient.dto';
 import { PatientQueryDto } from './dto/patient-query.dto';
 import { PatientsService } from './patients.service';
 
-const WRITE_ROLES = [Role.HOSPITAL_ADMIN, Role.DOCTOR, Role.NURSE, Role.RECEPTIONIST];
-const READ_ROLES = [...WRITE_ROLES, Role.PHARMACIST, Role.LAB_TECHNICIAN, Role.ACCOUNTANT];
-
 @ApiTags('patients')
 @Controller('patients')
 export class PatientsController {
   constructor(private readonly patientsService: PatientsService) {}
 
   @Post()
-  @Roles(...WRITE_ROLES)
+  @RequirePermissions(Permission.PATIENT_CREATE)
   @ResponseMessage('Patient registered successfully.')
   create(
     @Body() dto: CreatePatientDto,
@@ -40,14 +37,14 @@ export class PatientsController {
   }
 
   @Get()
-  @Roles(...READ_ROLES)
+  @RequirePermissions(Permission.PATIENT_READ)
   @ResponseMessage('Patients retrieved successfully.')
   findAll(@Query() query: PatientQueryDto, @CurrentUser() actor: AuthenticatedUser) {
     return this.patientsService.findAllForTenant(actor, query);
   }
 
   @Get(':id')
-  @Roles(...READ_ROLES)
+  @RequirePermissions(Permission.PATIENT_READ)
   @ResponseMessage('Patient retrieved successfully.')
   findOne(
     @Param('id', ParseUUIDPipe) id: string,
@@ -58,7 +55,7 @@ export class PatientsController {
   }
 
   @Patch(':id')
-  @Roles(...WRITE_ROLES)
+  @RequirePermissions(Permission.PATIENT_UPDATE)
   @ResponseMessage('Patient updated successfully.')
   update(
     @Param('id', ParseUUIDPipe) id: string,
