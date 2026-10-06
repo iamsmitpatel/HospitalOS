@@ -10,8 +10,9 @@ import { createTestApp, resetDatabase } from './utils/test-app';
  * doctor + schedule, patient, appointment, queue entry) independently in
  * Hospital A and Hospital B, then asserts cross-tenant access is denied
  * everywhere, mass assignment can't bypass the appointment state machine,
- * and a PATIENT-role account (no self-service built yet — see
- * /DECISIONS.md) is denied every operational endpoint outright.
+ * and a PATIENT-role account (via Phase 5 Connect self-registration — see
+ * connect-idor.e2e-spec.ts for Connect's OWN patient-vs-patient IDOR matrix)
+ * is still denied every STAFF/operational endpoint outright.
  */
 describe('Operations tenant isolation & security (e2e)', () => {
   let app: INestApplication;
@@ -168,23 +169,23 @@ describe('Operations tenant isolation & security (e2e)', () => {
     queueBId = b.queueId;
     queueEntryBId = b.queueEntryId;
 
-    // A PATIENT-role account for the "Role.PATIENT is denied everything" checks.
-    await request(server)
-      .post('/api/v1/users')
-      .set('Authorization', `Bearer ${adminAToken}`)
-      .send({
-        email: 'patient-role@hospitalos.dev',
-        password,
-        firstName: 'P',
-        lastName: 'Role',
-        role: 'PATIENT',
-      })
-      .expect(201);
+    // A PATIENT-role account for the "Role.PATIENT is denied everything"
+    // checks. Phase 5 made staff-created PATIENT users impossible (see
+    // PATIENT_SELF_REGISTRATION_ONLY in users.service.ts) — Connect
+    // self-registration is now the only way to get one.
     patientRoleToken = (
       await request(server)
-        .post('/api/v1/auth/login')
-        .send({ email: 'patient-role@hospitalos.dev', password })
-        .expect(200)
+        .post('/api/v1/auth/register-patient')
+        .send({
+          email: 'patient-role@hospitalos.dev',
+          password,
+          firstName: 'P',
+          lastName: 'Role',
+          phone: '+91 90000 00000',
+          dateOfBirth: '1990-01-01',
+          gender: 'FEMALE',
+        })
+        .expect(201)
     ).body.data.accessToken;
   });
 
@@ -294,7 +295,7 @@ describe('Operations tenant isolation & security (e2e)', () => {
     });
   });
 
-  describe('Role.PATIENT is denied every operational endpoint (no self-service built yet, §3/§55)', () => {
+  describe('Role.PATIENT is denied every STAFF/operational endpoint (Connect self-service lives on separate /patient/* routes, §3/§55)', () => {
     it('cannot list patients', async () => {
       await request(server)
         .get('/api/v1/patients')
