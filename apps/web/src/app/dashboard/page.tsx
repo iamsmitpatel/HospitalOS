@@ -1,25 +1,10 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { useAuth } from '@/lib/auth-context';
+import { AppShell } from '@/components/app-shell';
+import { useRequireAuth } from '@/lib/use-require-auth';
 
-/**
- * Protected shell only (master doc §44) — not the full hospital dashboard.
- * This redirect is a UX convenience, not a security boundary: every API
- * call the dashboard makes is independently authenticated and authorized by
- * the backend regardless of what this page shows or hides (see
- * /apps/web/README.md and /SECURITY.md).
- */
 export default function DashboardPage() {
-  const { user, loading, logout } = useAuth();
-  const router = useRouter();
-
-  useEffect(() => {
-    if (!loading && !user) {
-      router.replace('/login');
-    }
-  }, [loading, user, router]);
+  const { user, loading } = useRequireAuth();
 
   if (loading || !user) {
     return (
@@ -29,23 +14,14 @@ export default function DashboardPage() {
     );
   }
 
-  async function handleLogout() {
-    await logout();
-    router.push('/login');
-  }
-
   return (
-    <div className="dashboard">
-      <header>
-        <strong>HospitalOS</strong>
-        <button className="secondary" onClick={handleLogout}>
-          Log out
-        </button>
-      </header>
-      <main>
+    <AppShell>
+      <div className="page-header">
         <h1>
           Welcome, {user.firstName} {user.lastName}
         </h1>
+      </div>
+      <div className="panel">
         <p>
           <span className="badge">{user.role}</span>
         </p>
@@ -53,7 +29,7 @@ export default function DashboardPage() {
           {user.hospital ? `Hospital: ${user.hospital.name}` : 'Platform administrator — no hospital scope'}
         </p>
         <p className="muted">{user.email}</p>
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

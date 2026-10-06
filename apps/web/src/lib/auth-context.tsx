@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { apiRequest, refreshAccessToken } from './api-client';
+import { apiRequest, refreshAccessToken, RequestOptions } from './api-client';
 
 export interface CurrentUser {
   id: string;
@@ -27,6 +27,8 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
+  /** Every operational page should call the API through this, not apiRequest directly — it injects the current token and keeps it fresh across a silent refresh. */
+  authedRequest: <T>(path: string, options?: Omit<RequestOptions, 'accessToken'>) => Promise<T>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -103,9 +105,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [accessToken]);
 
+  const authedRequest = useCallback(
+    <T,>(path: string, options: Omit<RequestOptions, 'accessToken'> = {}) =>
+      apiRequest<T>(path, { ...options, accessToken }, setAccessToken),
+    [accessToken],
+  );
+
   const value = useMemo(
-    () => ({ user, loading, login, register, logout }),
-    [user, loading, login, register, logout],
+    () => ({ user, loading, login, register, logout, authedRequest }),
+    [user, loading, login, register, logout, authedRequest],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
