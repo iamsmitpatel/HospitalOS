@@ -1,5 +1,5 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
-import { AuditOutcome, Patient, Prisma } from '@prisma/client';
+import { AuditOutcome, Gender, Patient, Prisma } from '@prisma/client';
 import { AppException } from '../common/exceptions/app.exception';
 import { AuthenticatedUser } from '../common/decorators/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -56,16 +56,7 @@ export class PatientsService {
     }
 
     const patient = await this.prisma.$transaction(async (tx) => {
-      // Atomic per-hospital counter: a single UPDATE ... increment is
-      // row-locked by Postgres, so concurrent registrations for the same
-      // hospital serialize here and never hand out the same MRN twice.
-      // See /DATABASE.md and the concurrency test in test/patients.e2e-spec.ts.
-      const hospital = await tx.hospital.update({
-        where: { id: actor.hospitalId! },
-        data: { mrnSequence: { increment: 1 } },
-      });
-
-      const mrn = `${hospital.code}-${String(hospital.mrnSequence).padStart(MRN_SEQUENCE_PAD_LENGTH, '0')}`;
+      const mrn = await this.nextMrn(tx, actor.hospitalId!);
 
       return tx.patient.create({
         data: {
@@ -232,6 +223,186 @@ export class PatientsService {
       throw new AppException('PATIENT_NOT_FOUND', 'Patient not found.', HttpStatus.NOT_FOUND);
     }
     return patient;
+  }
+
+  /**
+   * HospitalOS Connect (Phase 5): resolves the clinical Patient record for a
+   * given (hospital, Connect user) pair, auto-creating one on first contact
+   * with that hospital — e.g. the patient's first-ever booking there — using
+   * the Connect account's own demographic fields as the initial values
+   * (independently editable per-hospital afterward, same as any other
+   * Patient record). Reuses the exact same atomic MRN-sequence mechanism as
+   * staff registration via create() above — see nextMrn().
+   */
+  async getOrCreateForConnectUser(
+    hospitalId: string,
+    connectUser: {
+      id: string;
+      firstName: string;
+      lastName: string;
+      phone: string | null;
+      dateOfBirth: Date | null;
+      gender: Gender | null;
+      email: string;
+    },
+    correlationId?: string,
+  ): Promise<Patient> {
+    const existing = await this.prisma.patient.findFirst({
+      where: { hospitalId, userId: connectUser.id },
+    });
+    if (existing) {
+      return existing;
+    }
+
+    if (!connectUser.phone || !connectUser.dateOfBirth || !connectUser.gender) {
+      throw new AppException(
+        'PATIENT_PROFILE_INCOMPLETE',
+        'Complete your profile (phone, date of birth, gender) before booking.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const patient = await this.prisma.$transaction(async (tx) => {
+      const mrn = await this.nextMrn(tx, hospitalId);
+      return tx.patient.create({
+        data: {
+          hospitalId,
+          mrn,
+          firstName: connectUser.firstName,
+          lastName: connectUser.lastName,
+          dateOfBirth: connectUser.dateOfBirth!,
+          gender: connectUser.gender!,
+          phone: connectUser.phone!,
+          email: connectUser.email,
+          registeredByUserId: connectUser.id,
+          userId: connectUser.id,
+        },
+      });
+    });
+
+    await this.auditService.log({
+      action: AuditAction.PATIENT_RECORD_LINKED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: connectUser.id,
+      hospitalId,
+      resourceType: 'Patient',
+      resourceId: patient.id,
+      correlationId,
+      metadata: { reason: 'connect_auto_created' },
+    });
+
+    return patient;
+  }
+
+  /**
+   * Links an EXISTING clinical record (created by hospital staff before
+   * this patient ever had a Connect account) to the caller's own identity —
+   * an explicit, server-validated claim (exact MRN + DOB + phone match),
+   * never implicit. See /SECURITY.md ("never accept patientId from the
+   * frontend and trust it") — the caller never supplies a patientId here at
+   * all, only the identifying details a legitimate owner would know.
+   */
+  async claimExistingRecord(
+    connectUser: { id: string },
+    claim: { hospitalId: string; mrn: string; dateOfBirth: string; phone: string },
+    correlationId?: string,
+  ): Promise<Patient> {
+    const dateOfBirth = this.parseAndValidateDateOfBirth(claim.dateOfBirth);
+    const patient = await this.prisma.patient.findUnique({
+      where: { hospitalId_mrn: { hospitalId: claim.hospitalId, mrn: claim.mrn } },
+    });
+    // Deliberately one generic error for "no such record," "already
+    // claimed by someone else," and "details don't match" — never lets a
+    // caller distinguish which case applies, same discipline as login's
+    // generic INVALID_CREDENTIALS (§ "never return different sensitive
+    // errors that allow an attacker to enumerate accounts").
+    if (
+      !patient ||
+      patient.userId !== null ||
+      patient.dateOfBirth.getTime() !== dateOfBirth.getTime() ||
+      patient.phone !== claim.phone
+    ) {
+      throw new AppException(
+        'PATIENT_RECORD_CLAIM_FAILED',
+        'Could not match a patient record with the details provided.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    // Atomic, conditional write — not a plain update() — because the check
+    // above and this write are two separate round-trips. Without the
+    // `userId: null` guard here, two concurrent claims that both read the
+    // record as unclaimed (e.g. two family members who both know the
+    // patient's DOB/phone) could both pass the check above, and whichever
+    // update() ran last would silently steal the link from the other. This
+    // way, only the request that lands first flips 0 -> 1 row; the loser
+    // gets `count === 0` and the same generic failure as any other
+    // mismatch, never a confusing "it worked" followed by someone else
+    // actually owning the record.
+    const result = await this.prisma.patient.updateMany({
+      where: { id: patient.id, userId: null },
+      data: { userId: connectUser.id },
+    });
+    if (result.count === 0) {
+      throw new AppException(
+        'PATIENT_RECORD_CLAIM_FAILED',
+        'Could not match a patient record with the details provided.',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const updated = await this.prisma.patient.findUniqueOrThrow({ where: { id: patient.id } });
+
+    await this.auditService.log({
+      action: AuditAction.PATIENT_RECORD_LINKED,
+      outcome: AuditOutcome.SUCCESS,
+      actorUserId: connectUser.id,
+      hospitalId: claim.hospitalId,
+      resourceType: 'Patient',
+      resourceId: updated.id,
+      correlationId,
+      metadata: { reason: 'connect_claimed_existing' },
+    });
+
+    return updated;
+  }
+
+  /** Every Patient record linked to this Connect account, across every hospital they've visited. */
+  async listForConnectUser(connectUserId: string): Promise<PatientResponseDto[]> {
+    const patients = await this.prisma.patient.findMany({
+      where: { userId: connectUserId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return patients.map((p) => this.toResponse(p));
+  }
+
+  /** Used by connect/ services to validate a patientId belongs to the calling Connect user — never a hospital-staff tenant check. */
+  async getOwnPatientRecordOrThrow(id: string, connectUserId: string): Promise<Patient> {
+    const patient = await this.prisma.patient.findUnique({ where: { id } });
+    if (!patient || patient.userId !== connectUserId) {
+      throw new AppException(
+        'PATIENT_NOT_FOUND',
+        'Patient record not found.',
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return patient;
+  }
+
+  /** Lets connect/ controllers shape a single raw Patient row (from claimExistingRecord, getOrCreateForConnectUser, getOwnPatientRecordOrThrow) without duplicating the field list. */
+  toPatientResponseDto(patient: Patient): PatientResponseDto {
+    return this.toResponse(patient);
+  }
+
+  private async nextMrn(tx: Pick<PrismaService, 'hospital'>, hospitalId: string): Promise<string> {
+    // Atomic per-hospital counter: a single UPDATE ... increment is
+    // row-locked by Postgres, so concurrent registrations for the same
+    // hospital serialize here and never hand out the same MRN twice.
+    // See /DATABASE.md.
+    const hospital = await tx.hospital.update({
+      where: { id: hospitalId },
+      data: { mrnSequence: { increment: 1 } },
+    });
+    return `${hospital.code}-${String(hospital.mrnSequence).padStart(MRN_SEQUENCE_PAD_LENGTH, '0')}`;
   }
 
   private toResponse(patient: Patient): PatientResponseDto {
