@@ -21,6 +21,11 @@ import { DepartmentsModule } from './departments/departments.module';
 import { DoctorsModule } from './doctors/doctors.module';
 import { AppointmentsModule } from './appointments/appointments.module';
 import { QueueModule } from './queue/queue.module';
+import { ClinicalModule } from './clinical/clinical.module';
+import { LaboratoryModule } from './laboratory/laboratory.module';
+import { PharmacyModule } from './pharmacy/pharmacy.module';
+import { BillingModule } from './billing/billing.module';
+import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
@@ -57,6 +62,11 @@ import { QueueModule } from './queue/queue.module';
     DoctorsModule,
     AppointmentsModule,
     QueueModule,
+    ClinicalModule,
+    LaboratoryModule,
+    PharmacyModule,
+    BillingModule,
+    PaymentsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
