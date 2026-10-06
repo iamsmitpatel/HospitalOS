@@ -33,7 +33,7 @@ describe('permissions foundation', () => {
       expect(roleHasPermission(Role.HOSPITAL_ADMIN, Permission.USER_READ)).toBe(true);
     });
 
-    it('grants clinical/staff roles no platform permissions (§14 — not modeled here, not implied)', () => {
+    it('grants clinical/staff roles no platform (hospital/user) permissions (§14 — never modeled, never implied)', () => {
       for (const role of [
         Role.DOCTOR,
         Role.NURSE,
@@ -43,8 +43,54 @@ describe('permissions foundation', () => {
         Role.ACCOUNTANT,
         Role.PATIENT,
       ]) {
-        expect(ROLE_PERMISSIONS[role]).toEqual([]);
+        expect(roleHasPermission(role, Permission.HOSPITAL_CREATE)).toBe(false);
+        expect(roleHasPermission(role, Permission.USER_CREATE)).toBe(false);
       }
+    });
+
+    it('grants Role.PATIENT zero permissions (Phase 3 builds no patient self-service endpoints)', () => {
+      expect(ROLE_PERMISSIONS[Role.PATIENT]).toEqual([]);
+    });
+
+    it('grants DOCTOR/NURSE/RECEPTIONIST the full clinical operational workflow (patient, appointment, queue)', () => {
+      for (const role of [Role.DOCTOR, Role.NURSE, Role.RECEPTIONIST]) {
+        expect(roleHasPermission(role, Permission.PATIENT_CREATE)).toBe(true);
+        expect(roleHasPermission(role, Permission.APPOINTMENT_CREATE)).toBe(true);
+        expect(roleHasPermission(role, Permission.QUEUE_OPERATE)).toBe(true);
+      }
+    });
+
+    it('grants only DOCTOR permission to manage schedules (ownership itself is checked at the service layer)', () => {
+      expect(roleHasPermission(Role.DOCTOR, Permission.DOCTOR_SCHEDULE_MANAGE)).toBe(true);
+      expect(roleHasPermission(Role.NURSE, Permission.DOCTOR_SCHEDULE_MANAGE)).toBe(false);
+      expect(roleHasPermission(Role.RECEPTIONIST, Permission.DOCTOR_SCHEDULE_MANAGE)).toBe(false);
+    });
+
+    it('grants PHARMACIST/LAB_TECHNICIAN/ACCOUNTANT read-only access, no write/operational permissions', () => {
+      for (const role of [Role.PHARMACIST, Role.LAB_TECHNICIAN, Role.ACCOUNTANT]) {
+        expect(roleHasPermission(role, Permission.PATIENT_READ)).toBe(true);
+        expect(roleHasPermission(role, Permission.PATIENT_CREATE)).toBe(false);
+        expect(roleHasPermission(role, Permission.APPOINTMENT_CREATE)).toBe(false);
+        expect(roleHasPermission(role, Permission.QUEUE_OPERATE)).toBe(false);
+      }
+    });
+
+    it('does not grant SUPER_ADMIN any patient/appointment/queue permission (clinical data stays excluded)', () => {
+      for (const permission of [
+        Permission.PATIENT_READ,
+        Permission.PATIENT_CREATE,
+        Permission.APPOINTMENT_READ,
+        Permission.APPOINTMENT_CREATE,
+        Permission.QUEUE_READ,
+        Permission.QUEUE_OPERATE,
+      ]) {
+        expect(roleHasPermission(Role.SUPER_ADMIN, permission)).toBe(false);
+      }
+    });
+
+    it('grants SUPER_ADMIN department/doctor org-structure permissions (platform-administration-adjacent, not clinical)', () => {
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.DEPARTMENT_CREATE)).toBe(true);
+      expect(roleHasPermission(Role.SUPER_ADMIN, Permission.DOCTOR_CREATE)).toBe(true);
     });
 
     it('every Role enum value has an explicit entry (no silent fallthrough)', () => {
