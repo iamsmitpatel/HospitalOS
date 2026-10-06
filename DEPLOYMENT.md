@@ -1,6 +1,6 @@
 # Deployment
 
-**Status as of Phase 4: local development only.** Nothing in this repository has been deployed anywhere, and no CI/CD pipeline exists yet (that's Phase 7 — production hardening, per master doc §27). This document covers running the platform locally. Phase 4 introduced no new environment variables or infrastructure dependencies — same Postgres + Redis as Phase 1-3.
+**Status as of Phase 5: still never deployed anywhere.** A CI pipeline and production Dockerfiles now exist (see below) but neither has been exercised by an actual deployment — this document still mainly covers running the platform locally. Phase 5 added `DEFAULT_THROTTLE_TTL_SECONDS`/`DEFAULT_THROTTLE_LIMIT` to the API's environment variables (see `apps/api/.env.example`); no new infrastructure dependencies (same Postgres + Redis as every prior phase).
 
 ## Prerequisites
 
@@ -51,15 +51,23 @@ See `apps/api/.env.example` for the full list. The app **will not boot** if requ
 - `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` must each be ≥32 characters and **must differ** between the two (not currently enforced by validation — a hardening candidate — but using the same secret for both would weaken the separation between access and refresh tokens).
 - `.env` and `.env.test` are git-ignored. Only `.env.example` is committed, and it contains placeholders, not real secrets.
 
+## CI/CD (Phase 5)
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: lint + build for both apps, unit tests for the API, and — using GitHub Actions' real Docker-backed Postgres/Redis service containers — the full e2e suite and `prisma migrate deploy`. This is the first point in the project where the long-standing local Docker blocker doesn't apply: GitHub's runners have a working Docker daemon, so every `*.e2e-spec.ts` file across every phase (written and type-checked throughout, never executed locally — see `/TESTING.md`) gets to actually run for the first time once this is pushed. The workflow itself has not been observed running (that only happens after a push triggers it); it was written against the actual `package.json` scripts and verified by typechecking/building locally, not by watching a real Actions run succeed.
+
+## Production Docker images (Phase 5)
+
+`apps/api/Dockerfile` and `apps/web/Dockerfile` — multi-stage builds, neither `docker build`-tested in this environment (no Docker daemon here either). `apps/web`'s underlying Next.js `output: 'standalone'` build **was** verified locally (`npm run build` actually produces `.next/standalone/apps/web/server.js` and its pruned `node_modules`, exactly what the Dockerfile copies); the Docker layer wrapping it is the untested part. See the comments at the top of each Dockerfile.
+
 ## Before this goes anywhere beyond localhost
 
-None of the following exist yet — do not deploy to a shared or production environment without them:
+Addressed this phase: CI (above), production Dockerfiles (above), backup/restore *procedure* documented (`/DATABASE.md` — but still **not** restore-tested, see there for why), migration lock/safety review (`/DATABASE.md`).
+
+Still missing — do not deploy to a shared or production environment without them:
 
 - A real secret-management story (the current `.env` file approach is dev-only).
-- CI running lint/build/test on every change.
-- A production Dockerfile for `apps/api` (none exists — `docker-compose.yml` currently only runs Postgres/Redis, not the API itself).
 - `NODE_ENV=production` behavior has been exercised in code (cookie `secure` flag, etc.) but never actually run against a production-like environment.
-- Backup/restore and disaster-recovery procedures for PostgreSQL.
+- An actual backup *restore* drill — the documented procedure has never been executed against real data (no live Postgres instance has existed in this project's history).
 - TLS termination — the app itself speaks plain HTTP; a reverse proxy/load balancer terminating TLS is assumed but not configured anywhere in this repo.
-
-These map to later phases (primarily Phase 7) in the master roadmap, not omissions within the current phase's own scope.
+- Structured (JSON) logging — still the built-in NestJS text `Logger`; see `/SECURITY.md` and `/DECISIONS.md` for why this stays deferred.
+- A container orchestrator/deployment target (Kubernetes manifests, ECS task definitions, a Fly.io/Render config, etc.) — the two Dockerfiles produce images; nothing here runs them anywhere yet.

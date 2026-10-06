@@ -25,7 +25,8 @@ Every response, success or failure, uses the same shape (master doc §15):
 | Method & path | Auth | Notes |
 |---|---|---|
 | `POST /auth/register` | Public | **Bootstrap only.** Succeeds only when zero users exist; creates the first `SUPER_ADMIN`. Returns `403 REGISTRATION_CLOSED` afterward. |
-| `POST /auth/login` | Public | Body: `{ email, password }`. Sets the refresh-token cookie; returns `{ accessToken, user }`. |
+| `POST /auth/register-patient` | Public | **HospitalOS Connect (Phase 5).** Self-registration for patients — never closes, unlike bootstrap `/auth/register`. Creates a `Role.PATIENT` user with `hospitalId: null` (not scoped to any one hospital — see `/ARCHITECTURE.md`). Body: `{ email, password, firstName, lastName, phone, dateOfBirth, gender }`, all required. Returns `{ accessToken, user }`, same shape as `/auth/login`. |
+| `POST /auth/login` | Public | Body: `{ email, password }`. Sets the refresh-token cookie; returns `{ accessToken, user }`. Works for every role including `PATIENT` — the distinction between the staff portal and Connect is enforced by the frontend (`apps/web`'s `/login` rejects a `PATIENT` session, see `/DECISIONS.md`) and by `PATIENT_PORTAL_ACCESS` being the only permission that role holds, not by this endpoint. |
 | `POST /auth/refresh` | Public (reads refresh cookie) | Rotates the refresh token; returns a new `{ accessToken }`. |
 | `POST /auth/logout` | Public (reads refresh cookie) | Revokes the current refresh token; clears the cookie. |
 | `GET /auth/me` | Any authenticated role | Returns the caller's own profile, including a nested `hospital: { id, name }` (or `null` for `SUPER_ADMIN`) — matches master doc §26's exact example shape. Note this differs from the `user` object returned by `/auth/login`/`/auth/register`/`/auth/refresh`, which only carries `hospitalId`. |
@@ -35,6 +36,8 @@ Every response, success or failure, uses the same shape (master doc §15):
 Every route is gated by `@RequirePermissions(...)` (see `/ARCHITECTURE.md` and `/SECURITY.md`): the caller's role must explicitly hold the listed permission(s) in `ROLE_PERMISSIONS` (`common/constants/permissions.constants.ts`) — **no implicit `SUPER_ADMIN` bypass**. (Phase 1/2 had a second, simpler `@Roles()` mechanism with a `SUPER_ADMIN`-always-passes bypass; it was removed in Phase 3 once every module had migrated to permissions — see `/DECISIONS.md`.) A route with no `@RequirePermissions()` at all (`GET /hospitals/:id`, `GET /auth/me`) is open to any authenticated role, with the real check done by the service's tenant-scoping logic.
 
 **The governing line for Phase 3 (master doc §14):** `SUPER_ADMIN` holds every `hospital.*`/`user.*`/`department.*`/`doctor.*` permission (platform administration and hospital org-structure) but **zero** `patient.*`/`appointment.*`/`queue.*` permission. A platform administrator has no legitimate reason to see a specific patient's record, book an appointment, or operate a live queue — that's clinical/operational data, not platform administration. See `/SECURITY.md`.
+
+**Phase 5 — `Role.PATIENT`:** holds exactly one permission, `PATIENT_PORTAL_ACCESS`, and nothing else — zero staff/operational permissions of any kind. That single permission gates every `/api/v1/patient/*` route; the *real* authorization within those routes is per-resource ownership checked in each service (`patient.userId === actor.userId`, never a tenant/hospitalId check, since a Connect account has no hospitalId) — see `/ARCHITECTURE.md` and `/SECURITY.md`.
 
 ## Users — `/api/v1/users`
 
@@ -55,6 +58,7 @@ All routes: `SUPER_ADMIN` (platform-wide) or `HOSPITAL_ADMIN` (own tenant only) 
 | `GET /hospitals` | `SUPER_ADMIN` (`hospital.list`) | Lists every tenant on the platform. |
 | `GET /hospitals/:id` | Any authenticated role | `SUPER_ADMIN` can fetch any hospital; anyone else only their own (`404` otherwise). No permission decorator — gated by the service-layer tenant check instead. |
 | `PATCH /hospitals/:id` | `SUPER_ADMIN` (`hospital.update`) | Rename or deactivate a tenant. |
+| `PATCH /hospitals/:id/public-profile` | `SUPER_ADMIN` or `HOSPITAL_ADMIN` (`hospital.public_profile.manage`) | **Phase 5.** Opt into (or out of) the HospitalOS Connect public directory and edit the public-facing listing: `isPublic`, `publicDescription`, `addressLine`, `city`, `publicPhone`, `publicEmail`, `operatingHours`. Deliberately narrower than full `hospital.update` — a hospital admin can manage their own Connect listing without gaining the platform-level rename/deactivate power. `isPublic` defaults to `false` on every hospital, including ones created before Phase 5 — nothing becomes publicly discoverable by migration alone. |
 
 ## Patients — `/api/v1/patients`
 
@@ -213,11 +217,48 @@ Nested create/list routes live under `/encounters/:id/...` (matching the `/docto
 
 None of the Phase 4 modules grant `SUPER_ADMIN` any patient-touching clinical permission (`ENCOUNTER_*`/`VITALS_*`/`CLINICAL_NOTE_*`/`DIAGNOSIS_*`/`PRESCRIPTION_*`/`LAB_ORDER_*`/`LAB_RESULT_*`) — same principle as Patients/Appointments/Queue in Phase 3. `HOSPITAL_ADMIN` gets full catalog and financial administration (`medicine.*`, `labtest.*`, `service.*`, `invoice.*`, `payment.*`, `inventory.*`) but is **equally excluded** from every clinical-record permission — an administrator is not a clinical role merely by administering the hospital. See `/SECURITY.md`.
 
+## HospitalOS Connect — `/api/v1/discover`, `/api/v1/patient` (Phase 5)
+
+Two distinct surfaces: **discovery** (`/discover/*`) is entirely public, no auth at all, for a prospective patient browsing before they even have an account; **patient** (`/patient/*`) requires a `Role.PATIENT` session (`PATIENT_PORTAL_ACCESS`) and every route resolves "which records are mine" via `actor.userId`, never a hospitalId (a Connect account has none — see `/ARCHITECTURE.md`).
+
+### Discovery — public, no auth
+
+| Method & path | Notes |
+|---|---|
+| `GET /discover/hospitals` | Paginated. Query: `city?`, `search?`, `page?`, `pageSize?`. Only hospitals with `isPublic: true` AND `isActive: true`. Returns a hand-picked field list (id, name, slug, publicDescription, addressLine, city, publicPhone, publicEmail, operatingHours) — never a raw `Hospital` row (no `mrnSequence`/`invoiceSequence`/internal `code` leakage). |
+| `GET /discover/hospitals/:id` | `404 HOSPITAL_NOT_FOUND` for a non-public or inactive hospital — same code whether it doesn't exist or simply isn't public, never revealing which. |
+| `GET /discover/hospitals/:id/departments` | Departments at a public hospital. |
+| `GET /discover/hospitals/:id/doctors` | Query: `departmentId?`, `specialization?`. Only doctors with `isPubliclyVisible: true` AND `status: ACTIVE`, at a public+active hospital. |
+| `GET /discover/doctors/:id` | `404 DOCTOR_NOT_FOUND` for a non-visible doctor or a non-public hospital — same anti-enumeration discipline as hospitals. |
+| `GET /discover/doctors/:id/available-slots` | Query: `date`. Shares the exact same slot-computation logic as the staff-side `GET /doctors/:id/available-slots` (`DoctorsService#computeAvailableSlots`, see `/ARCHITECTURE.md`) — no separate, potentially-divergent calculation. |
+
+### Patient — requires a `PATIENT`-role session
+
+| Method & path | Notes |
+|---|---|
+| `GET /patient/records` | Every `Patient` row linked to this Connect account, across every hospital it's visited. |
+| `POST /patient/records/claim` | Links a pre-existing, staff-created clinical record to this account. Body: `{ hospitalId, mrn, dateOfBirth, phone }` — never a `patientId`, only identifying details a legitimate owner would know. One generic `400 PATIENT_RECORD_CLAIM_FAILED` for "no such record," "already claimed by someone else," and "details don't match" alike (anti-enumeration, same discipline as login's `INVALID_CREDENTIALS`). Atomic — a concurrent claim on the same record cannot both "succeed" (see `/DECISIONS.md`). |
+| `POST /patient/appointments` | Body: `{ doctorProfileId, scheduledAt, durationMinutes?, reason?, idempotencyKey? }`. Auto-creates the patient's hospital-side `Patient`/MRN record on first booking there if one doesn't already exist (using the Connect profile's own phone/DOB/gender). `idempotencyKey`: a retried request with the same key returns the original booking, never a duplicate. |
+| `GET /patient/appointments` | This account's own appointments, across every hospital. |
+| `GET /patient/appointments/:id` | `404 APPOINTMENT_NOT_FOUND` if it doesn't belong to this account's own linked `Patient` record(s). |
+| `POST /patient/appointments/:id/cancel` | Ownership-checked the same way. |
+| `GET /patient/appointments/:id/queue-status` | Read-only. Returns the caller's own queue entry's status, token number, and — if still `WAITING` — a `position` (count of `WAITING` entries ahead, +1; `null` once `CALLED`/completed). Never another patient's identity, token, or position. |
+| `GET /patient/queue` | Every active (`WAITING`/`CALLED`) queue entry across this account's appointments. |
+| `GET /patient/records/:patientId/encounters` | List, then `GET .../encounters/:encounterId` for the full detail: vitals, clinical notes, diagnoses, prescriptions, lab orders. `patientId` must be one of the caller's own linked records (`404 PATIENT_NOT_FOUND` otherwise). |
+| `GET /patient/records/:patientId/prescriptions` | Only `FINALIZED`/`AMENDED` — a `DRAFT` prescription is a clinician's in-progress note, never shown as a finalized fact. |
+| `GET /patient/records/:patientId/lab-orders` | Every order is shown regardless of status, but a result is withheld (`null`) until `VERIFIED`/`AMENDED` — an `ENTERED`/`REVIEWED` value may still be an entry error or a preliminary read; showing it before clinical sign-off is a patient-safety risk, not a formatting choice. |
+| `GET /patient/records/:patientId/invoices` | Excludes `DRAFT` invoices (not yet issued, so not yet final either). |
+
+Deliberately out of scope this phase (see `/DECISIONS.md`): no reschedule endpoint for Connect bookings (cancel-and-rebook instead — same pattern as the record-claim flow being additive rather than a full account-merge); no family/dependent delegation (one Connect account, one linked `Patient` row per hospital — no second account can access a record it doesn't own).
+
 ## Health — `/api/v1/health`
 
 | Method & path | Auth | Notes |
 |---|---|---|
 | `GET /health` | Public | Checks live connectivity to Postgres (`SELECT 1` via Prisma) and Redis (`PING`). Returns Terminus's standard health-check shape (not wrapped in the success envelope, since monitoring tools expect the raw Terminus format). |
+| `GET /health/live` | Public | **Phase 5.** Liveness — checks nothing external, just "is the process responding." For an orchestrator's liveness probe: a transient DB/Redis blip should never cause a restart. |
+| `GET /health/ready` | Public | **Phase 5.** Readiness — same checks as `GET /health`. For an orchestrator's readiness probe: a failure should pull the instance out of rotation, not kill it. |
+| `GET /health/metrics` | Public (no JWT — a scraper has no user token) | **Phase 5.** Prometheus text-exposition format, not the JSON envelope (bypasses `ResponseInterceptor` via `@Res()`). Hand-rolled counters (`http_requests_total`, `http_request_duration_seconds_{sum,count}`), labeled by route *pattern* (never a raw URL with real IDs in it — unbounded cardinality). In-memory only; resets on restart. See `/DECISIONS.md` and `/ARCHITECTURE.md`. |
 
 ## Correlation IDs
 
@@ -225,4 +266,4 @@ Every response carries an `x-correlation-id` header — echoed from the request 
 
 ## Not yet implemented
 
-Radiology, insurance, AI, analytics, HospitalOS Connect public discovery, and patient-role self-service — all later-phase scope per the master roadmap (§3). (Clinical notes, prescriptions, laboratory, pharmacy, and billing/payments were added in Phase 4 — see above.)
+Radiology, insurance, AI/diagnosis assistance, analytics, telemedicine, microservices decomposition — explicitly out of scope per the Phase 5 master doc's closing instruction (no new product surface beyond what was asked for this phase). Within what Phase 5 *did* ask for: no reschedule endpoint for Connect bookings, no family/dependent-profile delegation, no document/report storage (no file-storage system exists in this codebase at all — N/A, not skipped), no real email/SMS delivery (the notification system is a provider-neutral abstraction with only a log-based provider wired up — see `/ARCHITECTURE.md` and `/DECISIONS.md`). (Clinical notes, prescriptions, laboratory, pharmacy, and billing/payments were added in Phase 4; HospitalOS Connect discovery/booking/queue-status/medical-records/notifications were added in Phase 5 — see above.)

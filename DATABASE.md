@@ -247,13 +247,48 @@ npm run prisma:migrate:deploy   # CI/production — applies existing migrations,
 npm run prisma:generate         # regenerate the Prisma Client after a schema change
 ```
 
-**Three migrations exist, none has ever been applied to a real database — treat all three as unverified:**
+**Six migrations exist, none has ever been applied to a real database — treat all six as unverified:**
 - `20261005000000_init` (Phase 1/2) — Hospital/User/RefreshToken/AuditLog/Patient.
 - `20261005120000_hospital_operations_core` (Phase 3) — Hospital.timezone, Department, DoctorProfile, DoctorSchedule, DoctorUnavailability, Appointment, Queue, QueueEntry, plus the hand-added partial unique index above.
 - `20261006000000_clinical_lab_pharmacy_billing` (Phase 4) — Hospital.invoiceSequence, Encounter, VitalSigns, ClinicalNote, Diagnosis, Prescription, PrescriptionItem, LabTest, LabOrder, LabOrderItem, LabResult, Medicine, StockBatch, StockMovement, DispenseRecord, Service, ServicePrice, Invoice, InvoiceItem, Payment, Refund, plus the six hand-added CHECK constraints above.
+- `20261006120000_hospitalos_connect` (Phase 5) — Hospital public-profile fields, User.phone/dateOfBirth/gender, Patient.userId (Connect linkage), DoctorProfile.isPubliclyVisible, Appointment.idempotencyKey.
+- `20261006180000_queue_entry_patient_index` (Phase 5) — `@@index([patientId])` on QueueEntry, added during the database-integrity audit once `patient-queue.service.ts`'s new query pattern made the missing index a real (not theoretical) gap.
+- `20261006190000_patient_connect_user_scoped_unique` (Phase 5) — fixes `Patient.userId`'s uniqueness scope from global to per-hospital; see `/DECISIONS.md` for the bug this corrects.
 
-Docker Desktop cannot start in this sandboxed environment (`docker ps` fails with "Docker Desktop is unable to start"; the underlying `com.docker.service` Windows service cannot even be started — confirmed independently in Phase 1, Phase 2, Phase 3, and again in Phase 4), so `prisma migrate dev` has never been run against a live Postgres instance here. All three migrations' SQL was instead generated with `prisma migrate diff` — the Phase 1/2 one via `--from-empty`, the Phase 3 and Phase 4 ones via `--from-schema-datamodel <previous-phase's-checked-out-schema.prisma> --to-schema-datamodel schema.prisma` (a schema-to-schema diff, so neither needed a database connection either) — then placed by hand into conventional `<timestamp>_<name>/migration.sql` files. This produces the same DDL `prisma migrate dev` would have generated, but **none has been proven to actually apply cleanly in sequence** — no migration-history table has ever been created, no `prisma migrate deploy` has ever run successfully end-to-end. The first person with working Docker/Postgres access must run `npx prisma migrate deploy` (or `migrate dev` to let Prisma re-derive matching diffs and confirm no drift) before any can be considered verified.
+Docker Desktop cannot start in this sandboxed environment (`docker ps` fails with "Docker Desktop is unable to start"; the underlying `com.docker.service` Windows service cannot even be started — confirmed independently in every phase, Phase 5 included), so `prisma migrate dev` has never been run against a live Postgres instance here. Every migration's SQL was instead generated with `prisma migrate diff` — Phase 1/2's via `--from-empty`, every later one via `--from-schema-datamodel <prior-snapshot> --to-schema-datamodel schema.prisma` (a schema-to-schema diff, so none needed a database connection either) — then placed by hand into conventional `<timestamp>_<name>/migration.sql` files. This produces the same DDL `prisma migrate dev` would have generated, but **none has been proven to actually apply cleanly in sequence** — no migration-history table has ever been created, no `prisma migrate deploy` has ever run successfully end-to-end. The first person with working Docker/Postgres access must run `npx prisma migrate deploy` (or `migrate dev` to let Prisma re-derive matching diffs and confirm no drift) before any can be considered verified.
 
 ## Local databases
 
 `docker-compose.yml` starts one Postgres container with two databases: `hospitalos_dev` (normal local development) and `hospitalos_test` (created by `docker/postgres/init-test-db.sql`, used exclusively by the e2e test suite — see `/TESTING.md`). Keep these separate; never point the test suite at the dev database.
+
+## Migration safety (Phase 5 review)
+
+Every migration across every phase reviewed for lock/downtime characteristics, since none has ever actually run and a few are easy to get wrong at real table sizes:
+
+- **Additive migrations** (`ADD COLUMN`, new tables, plain `CREATE INDEX`) — the overwhelming majority across all six migrations. Postgres can add a nullable column or a column with a non-volatile default without rewriting the table (fast, brief lock) on any reasonably modern Postgres version (11+); none of Phase 5's new columns (`Hospital.isPublic` etc., `User.phone`/`dateOfBirth`/`gender`, `Appointment.idempotencyKey`) are `NOT NULL` without a default, so this applies cleanly.
+- **`20261006180000_queue_entry_patient_index`** — a plain `CREATE INDEX`, which takes a lock that blocks concurrent writes to `queue_entries` for the duration of the index build. Fine at current/demo data volumes; **at real production scale, re-run this as `CREATE INDEX CONCURRENTLY` instead** (two passes, no write-blocking lock, at the cost of not being wrapped in the same transaction as other DDL) rather than applying this file verbatim on a live, busy table.
+- **`20261006190000_patient_connect_user_scoped_unique`** — `DROP INDEX` (fast) followed by `CREATE UNIQUE INDEX` (same locking caveat as above — prefer `CREATE UNIQUE INDEX CONCURRENTLY` at real scale). Before running this against any environment with real data, confirm the new constraint doesn't reject existing rows: Postgres treats every `NULL` in a unique index as distinct from every other `NULL`, so any number of un-linked (`userId IS NULL`) patients at the same hospital is fine — the only way this migration could fail on `CREATE UNIQUE INDEX` is if two existing rows already share the same non-null `(hospitalId, userId)` pair, which should be structurally impossible given how `userId` is only ever written by `getOrCreateForConnectUser`/`claimExistingRecord`, both of which check before writing.
+- **Phase 4's six hand-added CHECK constraints** (financial non-negativity, inventory non-negativity — see the Phase 4 section above) — `ADD CONSTRAINT ... CHECK (...)` validates every existing row at creation time, an unavoidable full-table scan. Acceptable on an empty/small table; on a large existing one, the safer sequence is `ADD CONSTRAINT ... NOT VALID` followed by a separate `VALIDATE CONSTRAINT` (doesn't block concurrent writes during validation). Not changed retroactively here since it's never actually been run, but flagged for whoever applies these for the first time against non-trivial data.
+- **No migration in this project drops a column or changes a column's type** — the lowest-risk category (never attempted), and the one most likely to need a backward-compatible multi-step rollout (deploy code that stops using the column, then drop it in a later migration) if one is ever needed.
+
+## Backup & disaster recovery
+
+**Status: documented procedure only — no restore has actually been performed.** The Phase 5 master doc asks for "an actual restore test"; that requires a running Postgres instance with real data to dump, which this environment has never had (same Docker blocker as every migration above). Documenting the honest gap rather than fabricating a test result that didn't happen.
+
+Intended procedure, standard for a single Postgres instance with no managed-backup service configured yet:
+
+```bash
+# Backup — logical dump, portable across Postgres minor versions
+pg_dump --format=custom --file=hospitalos_$(date +%Y%m%d_%H%M%S).dump \
+  "$DATABASE_URL"
+
+# Restore — into a FRESH, empty database, never over a live one
+createdb hospitalos_restore_test
+pg_restore --dbname=hospitalos_restore_test --no-owner hospitalos_<timestamp>.dump
+```
+
+Before this is production-ready:
+- Schedule (`pg_dump` via cron/a managed snapshot service) and retention policy — neither exists yet.
+- Off-site/separate-failure-domain storage for the dump files — a backup living on the same disk as the database it backs up protects against nothing.
+- An actual periodic restore-into-a-scratch-database drill (not just "the backup file exists") — the only way to know a backup is restorable is to have restored it, which is exactly the test this environment cannot run.
+- `WAL`-based point-in-time recovery (continuous archiving) if the acceptable data-loss window is smaller than "since the last daily dump" — not configured; `pg_dump` alone only gets you back to the last snapshot.
