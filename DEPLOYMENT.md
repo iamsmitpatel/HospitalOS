@@ -1,6 +1,6 @@
 # Deployment
 
-**Phase 1 status: local development only.** Nothing in this repository has been deployed anywhere, and no CI/CD pipeline exists yet (that's Phase 7 — production hardening, per master doc §27). This document covers running the Phase 1 foundation locally.
+**Status as of Phase 3: local development only.** Nothing in this repository has been deployed anywhere, and no CI/CD pipeline exists yet (that's Phase 7 — production hardening, per master doc §27). This document covers running the platform locally.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ Port 3001 matches the API's default `CORS_ORIGIN` (`apps/api/.env.example`) out 
 
 ## A note on this environment
 
-Every verification step in this repo's history that needs Docker — generating/applying a Prisma migration against a real database, running the e2e test suite, running the API itself (it calls Postgres on boot) — is **blocked** here: `docker ps` fails with "Docker Desktop is unable to start," and the underlying `com.docker.service` Windows service cannot be started directly either (confirmed in both Phase 1 and Phase 2, independently). If you're reading this in an environment where Docker actually works, none of this applies to you — just follow "First-time setup" above. If you hit the same blocker, see `/DATABASE.md` for how the initial migration was generated without a live database connection (`prisma migrate diff`), and `/TESTING.md` for exactly what has and hasn't been executed as a result.
+Every verification step in this repo's history that needs Docker — generating/applying a Prisma migration against a real database, running the e2e test suite, running the API itself (it calls Postgres on boot) — is **blocked** here: `docker ps` fails with "Docker Desktop is unable to start," and the underlying `com.docker.service` Windows service cannot be started directly either (confirmed independently in Phase 1, Phase 2, and Phase 3). If you're reading this in an environment where Docker actually works, none of this applies to you — just follow "First-time setup" above. If you hit the same blocker, see `/DATABASE.md` for how both migrations were generated without a live database connection (`prisma migrate diff`), and `/TESTING.md` for exactly what has and hasn't been executed as a result.
 
 ## Environment variables
 
@@ -62,4 +62,4 @@ None of the following exist yet — do not deploy to a shared or production envi
 - Backup/restore and disaster-recovery procedures for PostgreSQL.
 - TLS termination — the app itself speaks plain HTTP; a reverse proxy/load balancer terminating TLS is assumed but not configured anywhere in this repo.
 
-These map to later phases (primarily Phase 7) in the master roadmap, not omissions within Phase 1's own scope.
+These map to later phases (primarily Phase 7) in the master roadmap, not omissions within the current phase's own scope.

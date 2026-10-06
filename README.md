@@ -2,11 +2,11 @@
 
 A hospital operating platform for hospitals/clinics (HospitalOS) and a connected patient-facing platform (HospitalOS Connect). See the project's master engineering instructions (held outside this repo) for the full long-term scope.
 
-**Current status: Phase 2 — Core Platform Foundation.** Authentication, RBAC + a Role→Permission foundation, tenant (hospital) model, users, audit/health/config infrastructure, and a minimal frontend auth shell (register/login/protected dashboard). No patient-facing clinical workflow, scheduling, or billing UI exists yet — see `/CHANGELOG.md` and the latest Phase report for exactly what's implemented, and what's written-but-unverified due to this environment's Docker blocker.
+**Current status: Phase 3 — Hospital Operations Core.** Authentication, RBAC/permissions, tenant (hospital) model, users, audit/health/config infrastructure, and the operational workflow: departments, doctors (profile/schedule/availability), patients (incl. duplicate detection), appointments (state machine, conflict-safe booking/cancel/reschedule), and queue management (concurrency-safe call-next). Frontend covers the full staff-facing flow for all of the above. No clinical notes, prescriptions, laboratory, pharmacy, or billing exist yet — see `/CHANGELOG.md` and the latest Phase report for exactly what's implemented, and what's written-but-unverified due to this environment's Docker blocker.
 
 ## Stack
 
-NestJS 11 + TypeScript · PostgreSQL + Prisma 6 · Redis · Next.js 14 + React 18 (frontend — auth foundation only, see `/ARCHITECTURE.md`). See `/DECISIONS.md` for why these specific major versions were pinned instead of each package's newest release.
+NestJS 11 + TypeScript · PostgreSQL + Prisma 6 · Redis · Next.js 14 + React 18. See `/DECISIONS.md` for why these specific major versions were pinned instead of each package's newest release.
 
 ## Documentation
 

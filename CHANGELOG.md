@@ -1,5 +1,21 @@
 # Changelog
 
+## Phase 3 — Hospital Operations Core (2026-10-06)
+
+The operational workflow connecting Hospital → Departments → Doctors/Schedules → Patients → Appointments → Queue, built on the Phase 2 foundation (reused as-is: auth, RBAC/permissions, tenant isolation, audit, database patterns).
+
+- **New modules:** `departments/`, `doctors/` (profile + weekly recurring schedule + one-off unavailability + computed available-slots), `appointments/` (explicit state machine, DB-level conflict prevention via a hand-added partial unique index, history-preserving reschedule, no-show), `queue/` (check-in, race-proof `call-next` via Postgres `FOR UPDATE SKIP LOCKED`, skip/requeue/start/complete/cancel, synced to appointment status).
+- **Patients enhanced:** duplicate-registration detection (`POTENTIAL_DUPLICATE_PATIENT`, phone+DOB match, `confirmDuplicate` override), migrated from `@Roles()` to `@RequirePermissions()`, first unit-test coverage (`patients.service.spec.ts`).
+- **Permission foundation extended:** `department.*`, `doctor.*` (incl. `doctor.schedule.manage`), `patient.*`, `appointment.*`, `queue.read`/`queue.operate`. `SUPER_ADMIN` holds the org-structure permissions (Department, Doctor) but **none** of the patient-touching ones (Patient, Appointment, Queue) — see `/DECISIONS.md` for exactly where that line falls and why.
+- **Cleanup:** `RolesGuard`/`@Roles()` deleted entirely — every module had migrated to `@RequirePermissions()`, leaving it dead code that still ran on every request.
+- **New shared utilities:** `common/utils/timezone.util.ts` (dependency-free IANA-timezone-aware date math, unit-tested including a DST transition), `common/utils/tenant.util.ts` (shared tenant-resolution/cross-tenant-check helpers, with a strict no-`SUPER_ADMIN`-bypass variant for clinical data).
+- **Database:** `Hospital.timezone`; `Department`, `DoctorProfile`, `DoctorSchedule`, `DoctorUnavailability`, `Appointment`, `Queue`, `QueueEntry` tables; a hand-added partial unique index for appointment-slot conflict prevention. Second migration generated (`20261005120000_hospital_operations_core`) via the same `prisma migrate diff` workaround as Phase 1/2 — **unapplied**, same Docker blocker.
+- **Tests:** 5 new unit spec files (departments, doctors, appointments, queue, patients services, plus a timezone-math spec) — 96/96 unit tests passing. 5 new e2e spec files (operations tenant-isolation/IDOR/security matrix, 3 dedicated concurrency tests — MRN/appointment-booking/queue-call-next, and the full admin→department→doctor→patient→appointment→queue→completion workflow test) — written and type-checked, **not executed** (same Docker blocker as all e2e tests since Phase 1).
+- **Frontend (`apps/web`):** 6 new routes (`/departments`, `/doctors`, `/patients` + `/patients/[id]`, `/appointments` + `/appointments/[id]`, `/queues` + `/queues/[id]`), a shared `AppShell` nav/header component, `authedRequest()` added to the auth context so every page shares one token-aware fetch path. Queue dashboard polls every 5s (no WebSockets — master doc §75). Manually verified in a real browser (builds clean, all routes redirect correctly when unauthenticated, no console errors) against the same unreachable-API constraint as the rest of this environment.
+- Reconciled `ARCHITECTURE.md`, `DATABASE.md`, `API.md`, `SECURITY.md`, `TESTING.md`, `DECISIONS.md` with all of the above.
+
+Still outstanding, not done in this pass (out of Phase 3 scope or blocked by environment): both migrations' actual application to a live database, e2e test execution, `DoctorUnavailability` HTTP-level test coverage, frontend automated tests, CI.
+
 ## Phase 2 — Core Platform Foundation (2026-10-05)
 
 Started from a substantial inherited Phase 1 implementation (zero git commits existed yet — see "Phase 1 baseline" commit). Closed gaps against the Phase 2 spec and fixed one real security issue found along the way.

@@ -1,6 +1,6 @@
 # Security
 
-This documents the controls actually implemented in Phase 1 — not a compliance claim. Per master doc §22: implementing these controls does not by itself make the platform HIPAA/compliant-with-anything; that requires a separate, explicit assessment.
+This documents the controls actually implemented through Phase 3 — not a compliance claim. Per master doc §22: implementing these controls does not by itself make the platform HIPAA/compliant-with-anything; that requires a separate, explicit assessment.
 
 ## Authentication
 
@@ -17,16 +17,28 @@ This documents the controls actually implemented in Phase 1 — not a compliance
 
 Roles: `SUPER_ADMIN, HOSPITAL_ADMIN, DOCTOR, NURSE, RECEPTIONIST, PHARMACIST, LAB_TECHNICIAN, ACCOUNTANT, PATIENT`.
 
-- `@Roles(...)` on a controller method declares which roles may call it; `RolesGuard` enforces it. `SUPER_ADMIN` always passes (it's a platform-level role, not a bypass of tenant checks — see below). Currently used only by `patients/` (left as-is; out of Phase 2 scope).
-- `@RequirePermissions(...)` (Phase 2) declares which permissions a route needs; `PermissionsGuard` checks them against `common/constants/permissions.constants.ts`'s `ROLE_PERMISSIONS` map. **No implicit `SUPER_ADMIN` bypass** — a role passes only if its map entry explicitly lists every required permission. `users/` and `hospitals/` use this instead of `@Roles()`. Permissions modeled today: `hospital.read/create/update/list`, `user.read/create/update/deactivate`, `role.assign` — deliberately a small, explicit set (master doc §13: "do not implement hundreds of permissions prematurely"), not an attempt to model every future permission.
-- No `@Roles()`/`@RequirePermissions()` on a route means "any authenticated role" — used sparingly (`GET /auth/me`, `GET /hospitals/:id`, where the service layer does the real tenant check).
+- `@RequirePermissions(...)` declares which permissions a route needs; `PermissionsGuard` checks them against `common/constants/permissions.constants.ts`'s `ROLE_PERMISSIONS` map. **No implicit `SUPER_ADMIN` bypass, ever** — a role passes only if its map entry explicitly lists every required permission. Every module uses this as of Phase 3.
+- Phase 1/2 had a second mechanism, `@Roles()`/`RolesGuard`, with an implicit "`SUPER_ADMIN` always passes" bypass. It was **removed in Phase 3** once `patients/` (the last module still using it) migrated to `@RequirePermissions()` — at that point it was 100% dead code, run on every request for zero behavioral effect, and kept the bypass temptation available for any future module that reused it by copy-paste. See `/DECISIONS.md`.
+- No `@RequirePermissions()` on a route means "any authenticated role" — used sparingly (`GET /auth/me`, `GET /hospitals/:id`), where the service layer does the real tenant check instead.
 - Least privilege is enforced at the service layer beyond the route-level check: e.g. a `HOSPITAL_ADMIN` is blocked from creating another `HOSPITAL_ADMIN` or a `SUPER_ADMIN` (`ROLE_NOT_ALLOWED`), even though the route itself is open to `HOSPITAL_ADMIN`.
 
-### Platform administration vs. clinical access (master doc §14)
+Permissions modeled as of Phase 3: `hospital.*`, `user.*`, `role.assign`, `department.*`, `doctor.*` (incl. `doctor.schedule.manage`), `patient.*`, `appointment.*`, `queue.read`/`queue.operate` — deliberately a small, explicit set (master doc §13: "do not implement hundreds of permissions prematurely"), not an attempt to model every future permission. `queue.operate` covers call-next/skip/requeue/start/complete/cancel as one permission rather than six.
 
-`SUPER_ADMIN` is explicitly a **platform administration** role, not an implicit "can see everything" role. This is enforced two ways:
-1. `ROLE_PERMISSIONS[SUPER_ADMIN]` only lists `hospital.*`/`user.*`/`role.assign` — no clinical permission exists in the map at all, so there is nothing for `SUPER_ADMIN` (or anyone) to implicitly inherit.
-2. **`patients.service.ts` does not grant `SUPER_ADMIN` a tenant-scoping bypass** (fixed in Phase 2 — see `/DECISIONS.md`). Before this fix, `findAllForTenant` and `getTenantScopedPatientOrThrow` both skipped the `hospitalId` filter for `SUPER_ADMIN`, meaning a platform administrator could list or fetch *any* patient in *any* hospital — a direct violation of this principle. Both call sites now require `actor.hospitalId` unconditionally; `SUPER_ADMIN` (which always has `hospitalId: null`) gets the same `403 TENANT_CONTEXT_MISSING` / `404 PATIENT_NOT_FOUND` as any other caller with no hospital context. `RolesGuard`'s own "`SUPER_ADMIN` always passes" behavior was deliberately left unchanged for `patients/` — the fix is at the service layer (where this codebase's tenant-scoping has always lived), not by special-casing the guard.
+### Platform administration vs. clinical/operational access (master doc §14)
+
+`SUPER_ADMIN` is explicitly a **platform administration** role, not an implicit "can see everything" role. Phase 3 draws one consistent line across every module, not just Patients:
+
+| Group | Modules | `SUPER_ADMIN` access |
+|---|---|---|
+| Platform administration | `hospital.*`, `user.*`, `role.assign` | Full, platform-wide |
+| Org structure (judged administration-adjacent, not clinical) | `department.*`, `doctor.*` | Full, with explicit `hospitalId` (same pattern as Users/Hospitals) |
+| Patient-touching operational/clinical data | `patient.*`, `appointment.*`, `queue.*` | **None at all** — not in `ROLE_PERMISSIONS[SUPER_ADMIN]`, and the services never special-case the role either |
+
+For the third group this is enforced redundantly, on purpose:
+1. `ROLE_PERMISSIONS[SUPER_ADMIN]` simply doesn't list any `patient.*`/`appointment.*`/`queue.*` permission, so `PermissionsGuard` rejects the request before it reaches a controller method.
+2. Every service-layer tenant check for those three modules uses the **strict** variant (`assertSameTenantStrict` / an unconditional `actor.hospitalId` requirement — see `common/utils/tenant.util.ts`), which has no `SUPER_ADMIN` branch at all, unlike the Department/Doctor/User/Hospital checks (`assertSameTenant`, which does special-case `SUPER_ADMIN` for cross-hospital platform administration).
+
+This is the direct continuation of the Phase 2 fix: before that fix, `patients.service.ts`'s `findAllForTenant`/`getTenantScopedPatientOrThrow` skipped the `hospitalId` filter for `SUPER_ADMIN`, letting a platform administrator list or fetch *any* patient in *any* hospital. Phase 3 applies the same no-bypass discipline to the two new patient-touching modules (Appointments, Queue) from the start, rather than having to fix the same bug twice.
 
 ## Tenant isolation
 
@@ -37,7 +49,36 @@ This is the control the master doc treats as non-negotiable (§8, §9, §30), so
 3. Reads of a specific resource by ID (`GET /users/:id`, `GET /hospitals/:id`) check `resource.hospitalId === actor.hospitalId` (or `actor.role === SUPER_ADMIN`) and return **404**, not 403, on mismatch — see `/DECISIONS.md` for the reasoning (avoid confirming the resource exists in a tenant the caller can't see).
 4. List endpoints (`GET /users`) filter by `actor.hospitalId` at the database query level (`where: { hospitalId: actor.hospitalId }`), not by filtering an unscoped result set after the fact.
 
-This is exercised end-to-end by `apps/api/test/tenant-isolation.e2e-spec.ts`, which implements the exact A/B matrix the master doc requires (§30): Hospital A, Hospital B, a data record in each, and assertions that A→A and B→B succeed while A→B and B→A are both denied — **for Users and Hospitals only.** The Patients module (`patients.service.ts`) implements the identical pattern (`getTenantScopedPatientOrThrow`, same 404-not-403 design), but **has no test proving it** — no tenant-isolation coverage, no unit tests. Code-reading suggests it's correct; master doc §41 ("never assume... tenant isolation works") is exactly why that isn't good enough yet. Closing this gap is the top-priority item before Patient reaches Definition of Done (§44).
+This is exercised end-to-end by `apps/api/test/tenant-isolation.e2e-spec.ts` (Users/Hospitals, Phase 2) and `apps/api/test/operations-tenant-isolation.e2e-spec.ts` (Phase 3 — Department, Doctor, Patient, Appointment, Queue, plus a bidirectional A→B/B→A check and a `Role.PATIENT`-is-denied-everything check), both implementing the A/B matrix the master doc requires (§30, §65). Unit-test coverage of the same tenant-check logic exists per-module too (`*.service.spec.ts`, 96 tests total) — see `/TESTING.md` for what's actually been executed versus just written.
+
+## Appointment state machine (master doc §31/§32)
+
+`appointments.service.ts`'s `ALLOWED_TRANSITIONS` is the single source of truth for which status changes are legal — no endpoint, including `PATCH /appointments/:id`, can move an appointment to an arbitrary status (that endpoint only ever touches `reason`). Every status-changing endpoint calls `assertTransitionAllowed(current, target)` before writing.
+
+```
+SCHEDULED ──► CONFIRMED ──► IN_QUEUE ──► IN_CONSULTATION ──► COMPLETED
+    │              │             │
+    └──► CANCELLED ┘             └──► CANCELLED (via a linked queue-entry cancel)
+    └──► NO_SHOW ───┘
+```
+
+`COMPLETED`, `CANCELLED`, and `NO_SHOW` are terminal — `assertTransitionAllowed` rejects every transition out of them, including the master doc's explicit forbidden example (`COMPLETED → SCHEDULED`), proven directly in `appointments.service.spec.ts`. `CHECKED_IN` exists in the `AppointmentStatus` enum (future granularity) but no Phase 3 endpoint can reach it — check-in moves straight from `SCHEDULED`/`CONFIRMED` to `IN_QUEUE` in one transaction (see `/DECISIONS.md`).
+
+## Queue state machine (master doc §46/§52)
+
+`queue.service.ts`'s `ALLOWED_TRANSITIONS` (a separate, smaller map) governs `QueueEntry.status`: `WAITING → CALLED → IN_CONSULTATION → COMPLETED`, with `SKIPPED`/`CANCELLED` reachable from `WAITING`/`CALLED`, and `SKIPPED → WAITING` via an explicit requeue action only (not automatic — see `/DECISIONS.md` for why `SKIPPED` isn't terminal). Starting consultation and completing an entry update the linked `Appointment`'s status in the same database transaction, so the two state machines can never observably disagree (e.g. a queue entry `COMPLETED` while its appointment is still `IN_QUEUE`).
+
+## Concurrency-safety mechanisms (master doc §37-39, §80)
+
+Three independent invariants, three different mechanisms — chosen per-invariant, not a single generic solution applied everywhere (master doc §38: "choose the simplest mechanism that correctly protects the invariant"):
+
+| Invariant | Mechanism |
+|---|---|
+| MRN uniqueness (Phase 1B, unchanged) | Atomic `UPDATE Hospital SET mrnSequence = mrnSequence + 1` inside the same transaction as the `Patient` insert — Postgres row-locks `Hospital` for the update, serializing concurrent registrations for the same hospital. |
+| Appointment double-booking | A transactional availability pre-check (reusing `getAvailableSlots`) for a fast, friendly error in the common case, **backed by** a hand-added partial unique index (`appointments_doctor_active_slot_unique`, `WHERE status NOT IN ('CANCELLED','NO_SHOW')`) that makes a lost race fail at the database level with `P2002`, caught and surfaced as `409 SLOT_ALREADY_BOOKED`. The pre-check alone is insufficient — it's a read-then-write with a window a concurrent request can land in; the index is what actually closes that window. |
+| Queue call-next (no double-claim) | A single raw SQL statement (`UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)`) — atomic by construction, no application-level lock needed. See `/DATABASE.md` for the full statement and reasoning. |
+
+All three are exercised by dedicated concurrency e2e tests (`patient-mrn-concurrency`, `appointment-concurrency`, `queue-concurrency`) — written and type-checked, **not executed** in this environment (see `/TESTING.md`).
 
 ## Input validation
 
@@ -57,7 +98,7 @@ Passwords, raw tokens (access or refresh), OTPs, or clinical payloads. Audit met
 
 ## Audit log
 
-Every security-relevant action writes an `AuditLog` row via `AuditService.log()`: `USER_LOGIN`, `USER_LOGIN_FAILED`, `USER_LOGOUT`, `USER_REGISTERED`, `USER_CREATED`, `USER_UPDATED`, `REFRESH_TOKEN_REUSED`, `HOSPITAL_CREATED`, `HOSPITAL_UPDATED`, `PATIENT_REGISTERED`, `PATIENT_ACCESSED`, `PATIENT_UPDATED`. A failure to write an audit row is logged but **never** blocks or fails the primary request — audit logging is observability, not a transactional guarantee, and must not become an availability dependency for login/registration.
+Every security-relevant action writes an `AuditLog` row via `AuditService.log()`: `USER_LOGIN`, `USER_LOGIN_FAILED`, `USER_LOGOUT`, `USER_REGISTERED`, `USER_CREATED`, `USER_UPDATED`, `REFRESH_TOKEN_REUSED`, `HOSPITAL_CREATED`, `HOSPITAL_UPDATED`, `PATIENT_REGISTERED`, `PATIENT_ACCESSED`, `PATIENT_UPDATED`, plus Phase 3's `DEPARTMENT_CREATED`, `DEPARTMENT_UPDATED`, `DOCTOR_CREATED`, `DOCTOR_UPDATED`, `DOCTOR_DEACTIVATED`, `DOCTOR_SCHEDULE_CREATED`, `DOCTOR_SCHEDULE_UPDATED`, `DOCTOR_UNAVAILABILITY_CREATED`, `APPOINTMENT_CREATED`, `APPOINTMENT_UPDATED`, `APPOINTMENT_CANCELLED`, `APPOINTMENT_RESCHEDULED`, `APPOINTMENT_NO_SHOW`, `APPOINTMENT_COMPLETED`, `QUEUE_ENTRY_CREATED`, `QUEUE_ENTRY_CALLED`, `QUEUE_ENTRY_SKIPPED`, `QUEUE_ENTRY_STARTED`, `QUEUE_ENTRY_COMPLETED`, `QUEUE_ENTRY_CANCELLED`. Metadata stays non-sensitive and structured (e.g. `{ tokenNumber }`, `{ oldScheduledAt, newScheduledAt }`) — never a diagnosis, clinical note, or anything from `Appointment.reason`/`DoctorUnavailability.reason`. A failure to write an audit row is logged but **never** blocks or fails the primary request — audit logging is observability, not a transactional guarantee, and must not become an availability dependency for login/registration.
 
 ## Rate limiting
 
@@ -65,7 +106,7 @@ A global `ThrottlerGuard` is configured via `AUTH_THROTTLE_TTL_SECONDS` / `AUTH_
 
 ## Mass assignment
 
-The global `ValidationPipe`'s `forbidNonWhitelisted: true` is the actual control (§35 above) — an unrecognized field like `isSuperAdmin: true` in a request body is rejected with `400`, not silently dropped or accepted. `test/security.e2e-spec.ts` (Phase 2) asserts this directly against `POST /users`, in addition to the existing proof that a client-supplied `hospitalId` is ignored, not validated-and-trusted (`tenant-isolation.e2e-spec.ts`).
+The global `ValidationPipe`'s `forbidNonWhitelisted: true` is the actual control (§35 above) — an unrecognized field like `isSuperAdmin: true` in a request body is rejected with `400`, not silently dropped or accepted. `test/security.e2e-spec.ts` (Phase 2) asserts this against `POST /users`; `test/operations-tenant-isolation.e2e-spec.ts` (Phase 3) asserts the same for a `status` field smuggled into `PATCH /appointments/:id` (which only accepts `reason` — see `UpdateAppointmentDto`), in addition to the existing proof that a client-supplied `hospitalId` is ignored, not validated-and-trusted, for every tenant-scoped create endpoint (Departments, Doctors, Users).
 
 ## Frontend session handling
 
@@ -82,8 +123,10 @@ The global `ValidationPipe`'s `forbidNonWhitelisted: true` is the actual control
 - No automated dependency vulnerability scanning wired into CI yet (no CI exists yet — Phase 1 has no pipeline).
 - No account lockout after N failed logins beyond the global rate limiter.
 - No MFA.
-- No automated test coverage for Patient tenant isolation or concurrent-registration MRN safety — see the note under "Tenant isolation" above.
-- The generated Prisma migration (`20261005000000_init`) has never been applied to a real Postgres instance — Docker Desktop cannot start in this environment. See `/DATABASE.md`.
-- `apps/api/test/*.e2e-spec.ts` (all of them, Phase 1 and Phase 2 alike) have never been executed here for the same reason — `createTestApp()` calls `PrismaService.$connect()`, which requires a live database. See `/TESTING.md`.
+- Neither generated Prisma migration (`20261005000000_init`, `20261005120000_hospital_operations_core`) has ever been applied to a real Postgres instance — Docker Desktop cannot start in this environment. See `/DATABASE.md`.
+- `apps/api/test/*.e2e-spec.ts` (all of them, Phase 1 through Phase 3 alike) have never been executed here for the same reason — `createTestApp()` calls `PrismaService.$connect()`, which requires a live database. See `/TESTING.md`.
+- No SKIP-LOCKED-equivalent safety analysis has been done for the `Queue.nextTokenNumber` and `Hospital.mrnSequence` atomic-increment pattern under extremely high throughput (hundreds of concurrent requests) — the mandatory concurrency tests use 25/10/5-way concurrency (documented reductions from the master doc's suggested 100), not a load test. See `/TESTING.md`.
+- `DoctorProfile.registrationNumber` uniqueness is per-hospital, not globally — a doctor practicing across two hospitals in this platform could (in principle) register different or missing numbers at each. Not currently a product requirement; flagged as a future consideration, not a bug.
+- No automated reminder/notification system exists for upcoming appointments (explicitly out of Phase 3 scope — master doc §3, "advanced notifications").
 
-These are explicitly deferred, not accidentally missed — see the Phase 1 and Phase 2 reports for what's recommended for later phases (Phase 7 is production hardening).
+These are explicitly deferred, not accidentally missed — see the Phase 1, Phase 2, and Phase 3 reports for what's recommended for later phases (Phase 7 is production hardening).
