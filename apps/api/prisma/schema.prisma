@@ -238,6 +238,26 @@ model Hospital {
   // interpreted in this timezone — see /DATABASE.md.
   timezone String @default("Asia/Kolkata")
 
+  // --- HospitalOS Connect public discovery (Phase 5) ---------------------
+  // Defaults to false: an existing hospital never becomes publicly
+  // discoverable just because this column was added — a HOSPITAL_ADMIN (or
+  // SUPER_ADMIN) must explicitly opt in via PATCH /hospitals/:id/public-profile.
+  // Only the fields below are ever exposed by the public discovery
+  // endpoints; everything else on this model (mrnSequence, invoiceSequence,
+  // internal ids, etc.) never is, isPublic or not — see connect/discovery
+  // services and /SECURITY.md.
+  isPublic          Boolean @default(false)
+  publicDescription String?
+  addressLine       String?
+  city              String?
+  publicPhone       String?
+  publicEmail       String?
+  // Free text (e.g. "Mon-Sat 9:00-18:00") rather than a structured weekly
+  // table — same "do not build all of this immediately" judgment as
+  // Patient.addressLine in Phase 1B. A structured DoctorSchedule-style table
+  // already exists for actual slot computation; this is display-only.
+  operatingHours    String?
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -285,6 +305,19 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // HospitalOS Connect (Phase 5): baseline identity for a PATIENT account,
+  // independent of any specific hospital's Patient record — a Connect user
+  // may book at several hospitals, each creating/linking its own Patient
+  // row (with its own MRN), but "who this person is" has exactly one
+  // source of truth here rather than being duplicated-and-possibly-
+  // divergent across every hospital they've visited. Always null for staff
+  // roles; never required at the Prisma level (no role-conditional NOT NULL
+  // — same reasoning as hospitalId above) so this column costs nothing for
+  // the staff identities that don't use it.
+  phone       String?
+  dateOfBirth DateTime? @db.Date
+  gender      Gender?
+
   // Null only for SUPER_ADMIN, who is not scoped to a single hospital.
   // Enforced at the application layer (see users/users.service.ts) since
   // Prisma cannot express a conditional NOT NULL constraint declaratively.
@@ -295,6 +328,13 @@ model User {
   auditLogs         AuditLog[]
   registeredPatients Patient[] @relation("PatientRegisteredBy")
   doctorProfile      DoctorProfile?
+
+  // HospitalOS Connect (Phase 5): the clinical Patient record(s) this
+  // identity is linked to — at most one per hospital (Patient.userId is
+  // unique), but a single Connect account may be linked to several across
+  // different hospitals (one MRN per hospital visited). See
+  // connect/patient-profile.service.ts and /DECISIONS.md.
+  patientRecords Patient[] @relation("PatientConnectAccount")
 
   @@index([hospitalId])
   @@map("users")
@@ -365,6 +405,22 @@ model Patient {
   registeredByUserId String
   registeredBy       User   @relation("PatientRegisteredBy", fields: [registeredByUserId], references: [id], onDelete: Restrict)
 
+  // HospitalOS Connect (Phase 5): the patient's own login identity, if
+  // they've linked this record to a Connect account — nullable (most
+  // historical records predate Connect and are never claimed). Unique only
+  // PER HOSPITAL (see @@unique([hospitalId, userId]) below), not globally:
+  // one Connect account legitimately links to one Patient row at EACH
+  // hospital it has visited (one MRN each), so a bare @unique here would
+  // have made a second hospital's booking fail outright the moment a
+  // patient already had a linked record anywhere else — caught during the
+  // Phase 5 database-integrity audit before it shipped, see /DECISIONS.md.
+  // Linking happens via an explicit, server-validated claim (exact MRN +
+  // DOB + phone match) or auto-creation on first booking at a hospital,
+  // never implicitly — see patients.service.ts and /SECURITY.md ("never
+  // accept patientId from the frontend and trust it").
+  userId String?
+  user   User?   @relation("PatientConnectAccount", fields: [userId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -381,6 +437,11 @@ model Patient {
   dispenseRecords DispenseRecord[]
 
   @@unique([hospitalId, mrn])
+  // One linked Patient row per Connect account PER HOSPITAL — see the
+  // comment on `userId` above. Multiple NULLs are allowed (Postgres treats
+  // NULL as distinct from NULL in a unique index), so every pre-Connect,
+  // never-claimed record is completely unaffected.
+  @@unique([hospitalId, userId])
   @@index([hospitalId, lastName, firstName])
   @@index([hospitalId, phone])
   @@map("patients")
@@ -441,6 +502,14 @@ model DoctorProfile {
   registrationNumber String?
 
   status DoctorStatus @default(ACTIVE)
+
+  // HospitalOS Connect (Phase 5): per-doctor opt-out of public listing,
+  // independent of Hospital.isPublic — "doctor profiles must respect
+  // hospital configuration" (master doc) means a doctor is only ever
+  // listable when BOTH this is true AND the owning hospital is public.
+  // Defaults true so existing doctors are listable the moment their
+  // hospital opts in, without a second manual step per doctor.
+  isPubliclyVisible Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -543,12 +612,23 @@ model Appointment {
 
   bookedByUserId String
 
+  // HospitalOS Connect (Phase 5): client-supplied idempotency key for
+  // patient-initiated booking, same two-layer pattern (pre-check + unique-
+  // constraint backstop) already proven for Payment.idempotencyKey — a
+  // retried booking request with the same key returns the original
+  // appointment instead of attempting a second booking. Nullable so
+  // staff-side bookings (which never supply one) aren't constrained against
+  // each other (Postgres treats multiple NULLs in a unique index as
+  // distinct, same reasoning as Payment's).
+  idempotencyKey String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   queueEntry QueueEntry?
   encounter  Encounter?
 
+  @@unique([hospitalId, idempotencyKey])
   @@index([hospitalId, doctorProfileId, scheduledAt])
   @@index([hospitalId, patientId])
   @@index([hospitalId, status])
@@ -624,6 +704,13 @@ model QueueEntry {
 
   @@unique([queueId, tokenNumber])
   @@index([queueId, status])
+  // Added in Phase 5: HospitalOS Connect's patient-queue.service.ts filters
+  // QueueEntry by a Patient.userId relation (a Connect patient's own active
+  // entries) — that join lands on this FK, which until now had no index of
+  // its own (Postgres never auto-indexes a foreign key column). Without
+  // this, "where is my queue entry" degrades to a sequential scan as
+  // queue_entries grows. See /DATABASE.md.
+  @@index([patientId])
   @@map("queue_entries")
 }
 
