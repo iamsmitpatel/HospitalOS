@@ -148,7 +148,7 @@ export class UsersService {
       return actor.hospitalId;
     }
 
-    // actor.role === Role.SUPER_ADMIN (the only other role permitted by RolesGuard on this route)
+    // actor.role === Role.SUPER_ADMIN (the only other role holding user.create — see PermissionsGuard)
     if (dto.role === Role.SUPER_ADMIN) {
       return null;
     }
