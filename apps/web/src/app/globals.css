@@ -356,3 +356,18 @@ button.slot.selected {
 .muted {
   color: var(--muted);
 }
+
+/* Keeps a <label> available to screen readers for an input whose visible
+   placeholder text isn't a substitute for one (WCAG 3.3.2) — not display:none,
+   which would remove it from the accessibility tree entirely too. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

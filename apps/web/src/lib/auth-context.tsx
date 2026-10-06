@@ -24,7 +24,7 @@ interface AuthContextValue {
   user: CurrentUser | null;
   /** True only while bootstrapping the session on first load (silent refresh + /me). */
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<CurrentUser>;
   register: (input: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
   /** Every operational page should call the API through this, not apiRequest directly — it injects the current token and keeps it fresh across a silent refresh. */
@@ -41,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadCurrentUser = useCallback(async (token: string) => {
     const me = await apiRequest<CurrentUser>('/auth/me', { accessToken: token }, setAccessToken);
     setUser(me);
+    return me;
   }, []);
 
   useEffect(() => {
@@ -78,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         skipAuthRetry: true,
       });
       setAccessToken(result.accessToken);
-      await loadCurrentUser(result.accessToken);
+      return loadCurrentUser(result.accessToken);
     },
     [loadCurrentUser],
   );

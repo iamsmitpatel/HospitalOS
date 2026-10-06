@@ -240,7 +240,11 @@ export default function PatientsPage() {
 
       <div className="panel">
         <form onSubmit={handleSearchSubmit} className="form-actions">
+          <label htmlFor="patientSearch" className="visually-hidden">
+            Search patients by name, MRN, or phone
+          </label>
           <input
+            id="patientSearch"
             placeholder="Search by name, MRN, or phone"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
