@@ -6,6 +6,7 @@ describe('QueueService', () => {
   let prisma: any;
   let auditService: any;
   let appointmentsService: any;
+  let notificationsService: any;
   let service: QueueService;
 
   const actor: AuthenticatedUser = {
@@ -49,12 +50,14 @@ describe('QueueService', () => {
         update: jest.fn(),
       },
       appointment: { update: jest.fn() },
+      patient: { findUnique: jest.fn().mockResolvedValue(null) },
       $transaction: jest.fn((cb: any) => cb(prisma)),
       $queryRaw: jest.fn(),
     };
     auditService = { log: jest.fn() };
     appointmentsService = { getTenantScopedAppointmentOrThrow: jest.fn() };
-    service = new QueueService(prisma, auditService, appointmentsService);
+    notificationsService = { notify: jest.fn().mockResolvedValue(undefined) };
+    service = new QueueService(prisma, auditService, appointmentsService, notificationsService);
   });
 
   describe('checkIn', () => {
@@ -133,6 +136,37 @@ describe('QueueService', () => {
 
       expect(result.status).toBe('CALLED');
       expect(prisma.$queryRaw).toHaveBeenCalled();
+      expect(notificationsService.notify).not.toHaveBeenCalled();
+    });
+
+    it('notifies the patient when their record is linked to a Connect account', async () => {
+      prisma.queue.findUnique.mockResolvedValue({ id: 'queue-1', hospitalId: 'hospital-a' });
+      prisma.$queryRaw.mockResolvedValue([{ id: 'entry-1' }]);
+      prisma.queueEntry.findUniqueOrThrow.mockResolvedValue({
+        id: 'entry-1',
+        queueId: 'queue-1',
+        appointmentId: 'appt-1',
+        patientId: 'patient-1',
+        tokenNumber: 7,
+        status: 'CALLED',
+        priority: 0,
+        joinedAt: new Date(),
+        calledAt: new Date(),
+      });
+      prisma.patient.findUnique.mockResolvedValue({
+        id: 'patient-1',
+        user: { id: 'connect-1', email: 'patient@example.com' },
+      });
+
+      await service.callNext('queue-1', actor);
+
+      expect(notificationsService.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'QUEUE_CALLED',
+          to: 'patient@example.com',
+          recipientUserId: 'connect-1',
+        }),
+      );
     });
 
     it('throws a controlled NO_WAITING_PATIENTS when nothing is claimable', async () => {

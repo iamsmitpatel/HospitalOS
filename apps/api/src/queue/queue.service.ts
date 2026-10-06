@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/audit.constants';
 import { AppointmentsService, assertTransitionAllowed } from '../appointments/appointments.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateQueueEntryDto } from './dto/create-queue-entry.dto';
 import { QueueQueryDto } from './dto/queue-query.dto';
 import { QueueDetailResponseDto, QueueResponseDto } from './dto/queue-response.dto';
@@ -45,6 +46,7 @@ export class QueueService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly appointmentsService: AppointmentsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   /** "Check in" — creates (or reuses a SKIPPED) QueueEntry for an appointment, get-or-creating today's queue for that doctor. */
@@ -215,6 +217,27 @@ export class QueueService {
       correlationId,
       metadata: { tokenNumber: entry.tokenNumber },
     });
+
+    // Only Connect patients have a linked account (and therefore an email)
+    // to notify — a staff-registered-only patient has none, so this is a
+    // best-effort notification, never a requirement for calling next.
+    const patient = await this.prisma.patient.findUnique({
+      where: { id: entry.patientId },
+      include: { user: { select: { id: true, email: true } } },
+    });
+    if (patient?.user) {
+      await this.notificationsService.notify({
+        type: 'QUEUE_CALLED',
+        channel: 'EMAIL',
+        to: patient.user.email,
+        subject: "It's your turn",
+        body: `Token #${entry.tokenNumber} — please proceed to the counter now.`,
+        hospitalId: queue.hospitalId,
+        recipientUserId: patient.user.id,
+        triggeredByUserId: actor.userId,
+        correlationId,
+      });
+    }
 
     return this.toEntryResponse(entry);
   }
